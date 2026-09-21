@@ -1,0 +1,9 @@
+# Environment and local tooling
+.env
+**/.env.local
+**/node_modules/
+**/dist/
+**/target/
+.idea/
+.vscode/
+

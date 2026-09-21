@@ -1,0 +1,11 @@
+:root { font-family: Inter, system-ui, sans-serif; color: #172033; background: #f4f7fb; }
+body { margin: 0; }
+main { max-width: 960px; margin: 5vh auto; padding: 2rem; background: white; border-radius: 12px; box-shadow: 0 8px 30px #17203318; }
+h1 { margin-top: 0; }
+section { margin-top: 1.5rem; padding: 1rem; border-radius: 8px; }
+.ok { background: #eaf8ef; color: #14532d; }.error { background: #fff0f0; color: #991b1b; padding: .75rem; border-radius: 8px; }
+header, .inline, article, .actions { display: flex; gap: .75rem; align-items: center; } header, article { justify-content: space-between; } header p { margin: 0; color: #526079; }
+.card, .workspace { margin-top: 1.25rem; padding: 1.25rem; border: 1px solid #dce3ee; border-radius: 10px; }.card h2 { margin-top: 0; }
+input, select, button { font: inherit; padding: .65rem .8rem; border-radius: 6px; border: 1px solid #bac5d5; } input { flex: 1; } button { background: #1d4ed8; color: white; border: 0; cursor: pointer; }.secondary, .link { background: #e6ebf4; color: #1f2937; }.danger { background: #b91c1c; }.link { margin-top: 1rem; }
+.projects { display: grid; gap: .75rem; } article { padding: 1rem; border: 1px solid #dce3ee; border-radius: 8px; } article p { margin: .35rem 0 0; color: #526079; }.role { margin-left: .6rem; font-size: .75rem; color: #1d4ed8; }.auth { max-width: 440px; margin-top: 12vh; }.auth form { display: grid; gap: .75rem; }.workspace { min-height: 260px; display: grid; place-content: center; text-align: center; background: #f8fafc; }.members { margin-top: 1rem; display: grid; gap: .5rem; }.member { display: flex; justify-content: space-between; align-items: center; padding: .65rem; background: #f8fafc; border-radius: 6px; }.member select, .member button { margin-left: .5rem; }
+@media (max-width: 650px) { main { margin: 0; border-radius: 0; min-height: 100vh; } .inline, article, header { align-items: stretch; flex-direction: column; }.actions { flex-wrap: wrap; } .member { align-items: flex-start; flex-direction: column; gap: .5rem; } }
