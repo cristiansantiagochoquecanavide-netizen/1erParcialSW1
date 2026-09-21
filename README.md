@@ -17,13 +17,26 @@ Base técnica del monorepo para una herramienta CASE centrada en diagramas de cl
 - Maven 3.9 o superior.
 - Node.js 20 o superior.
 
-## Inicio rápido
+## Inicio rápido con Docker (Recomendado)
 
-1. Desde esta carpeta, copie `.env.example` a `.env` y ajuste valores si lo necesita.
-2. Inicie PostgreSQL: `docker compose up -d postgres`.
-3. En otra terminal, inicie la API: `cd backend; mvn spring-boot:run`.
-4. En otra terminal, inicie el cliente: `cd frontend; npm install; npm run dev`.
-5. Abra la URL indicada por Vite, normalmente `http://localhost:5173`.
+Con Docker Desktop iniciado, levante el stack completo (PostgreSQL, Backend y Frontend):
+
+```bash
+docker compose up --build -d
+```
+
+- **Frontend (Editor CASE)**: `http://localhost:5173`
+- **Backend API**: `http://localhost:8080` (Salud: `http://localhost:8080/api/health`)
+- **Base de Datos**: PostgreSQL en `localhost:5432`
+
+Para detener los servicios: `docker compose down`.
+
+## Inicio rápido manual (Desarrollo local)
+
+1. Inicie PostgreSQL: `docker compose up -d postgres`.
+2. En una terminal, inicie la API: `cd backend; mvn spring-boot:run`.
+3. En otra terminal, inicie el cliente: `cd frontend; npm install; npm run dev`.
+4. Abra la URL indicada por Vite, normalmente `http://localhost:5173`.
 
 La vista principal permite registro/inicio de sesión, conserva el JWT en `localStorage` y lo envía como `Authorization: Bearer <token>`. También permite crear y administrar proyectos, colaboradores y sus roles. La ruta `GET http://localhost:8080/api/health` confirma el backend y comprueba PostgreSQL mediante `SELECT 1`.
 
