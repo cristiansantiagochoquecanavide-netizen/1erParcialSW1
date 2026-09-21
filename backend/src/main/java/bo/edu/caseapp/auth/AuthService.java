@@ -5,6 +5,7 @@ import bo.edu.caseapp.user.User;
 import bo.edu.caseapp.user.UserRepository;
 import java.util.Locale;
 import org.springframework.security.authentication.*;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
