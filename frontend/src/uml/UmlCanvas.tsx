@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ReactFlow,
   Background,
@@ -31,10 +31,12 @@ import { RelationModal } from './RelationModal'
 import { ValidationModal } from './ValidationModal'
 import { RelationalModal } from './RelationalModal'
 
-const base = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080'
+const base = import.meta.env.VITE_API_BASE_URL !== undefined ? import.meta.env.VITE_API_BASE_URL : ''
+const NODE_TYPES = { umlClass: UmlClassNode }
 
 async function request<T>(path: string, token: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${base}${path}`, {
+  const url = base ? `${base}${path}` : path
+  const response = await fetch(url, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -76,26 +78,28 @@ export function UmlCanvas({ project, auth, onError }: Props) {
   const [validating, setValidating] = useState(false)
   const [generatingRelational, setGeneratingRelational] = useState(false)
 
-  const nodeTypes = useMemo(() => ({ umlClass: UmlClassNode }), [])
+  // Referencias mutables para evitar dependencias circulares en callbacks y efectos
+  const elementsRef = useRef(elementsRaw)
+  elementsRef.current = elementsRaw
+  const diagramRef = useRef(diagram)
+  diagramRef.current = diagram
 
-  // Callback para abrir edición de elemento
-  const handleEditElement = useCallback(
-    (elementId: string) => {
-      const el = elementsRaw.find((e) => e.id === elementId)
-      if (el) setEditingElement(el)
-    },
-    [elementsRaw]
-  )
+  // Callback para abrir edición de elemento (referencia estable)
+  const handleEditElement = useCallback((elementId: string) => {
+    const el = elementsRef.current.find((e) => e.id === elementId)
+    if (el) setEditingElement(el)
+  }, [])
 
-  // Callback para eliminar elemento
+  // Callback para eliminar elemento (referencia estable sin dependencia de elementsRaw)
   const handleDeleteElement = useCallback(
     async (elementId: string) => {
-      if (isReadOnly || !diagram) return
-      const el = elementsRaw.find((e) => e.id === elementId)
+      const currentDiagram = diagramRef.current
+      if (isReadOnly || !currentDiagram) return
+      const el = elementsRef.current.find((e) => e.id === elementId)
       if (!confirm(`¿Eliminar elemento «${el?.nombre ?? ''}» y sus relaciones?`)) return
       try {
         setSavingStatus('Guardando...')
-        await request(`/api/projects/${project.id}/diagrams/${diagram.id}/elements/${elementId}`, auth.token, {
+        await request(`/api/projects/${project.id}/diagrams/${currentDiagram.id}/elements/${elementId}`, auth.token, {
           method: 'DELETE'
         })
         setElementsRaw((prev) => prev.filter((e) => e.id !== elementId))
@@ -108,7 +112,7 @@ export function UmlCanvas({ project, auth, onError }: Props) {
         onError(err)
       }
     },
-    [isReadOnly, diagram, elementsRaw, project.id, auth.token, onError]
+    [isReadOnly, project.id, auth.token, onError]
   )
 
   // Transformar datos del backend a nodos de React Flow
@@ -172,36 +176,41 @@ export function UmlCanvas({ project, auth, onError }: Props) {
     })
   }, [])
 
-  // Carga inicial del diagrama
-  const loadDiagramData = useCallback(async () => {
-    try {
-      setSavingStatus('Cargando...')
-      // 1. Obtener o crear diagrama por defecto
-      const def = await request<DiagramSummary>(
-        `/api/projects/${project.id}/diagrams/default`,
-        auth.token
-      )
-      setDiagram(def)
+  // Carga inicial única del diagrama al montar el componente
+  useEffect(() => {
+    let isMounted = true
+    async function init() {
+      try {
+        setSavingStatus('Cargando...')
+        const def = await request<DiagramSummary>(
+          `/api/projects/${project.id}/diagrams/default`,
+          auth.token
+        )
+        if (!isMounted) return
+        setDiagram(def)
 
-      // 2. Cargar vista completa
-      const full = await request<DiagramFullView>(
-        `/api/projects/${project.id}/diagrams/${def.id}`,
-        auth.token
-      )
-      setElementsRaw(full.elements)
-      setRelationsRaw(full.relations)
-      setNodes(buildNodes(full.elements))
-      setEdges(buildEdges(full.relations))
-      setSavingStatus('Guardado')
-    } catch (err) {
-      setSavingStatus('Error al cargar')
-      onError(err)
+        const full = await request<DiagramFullView>(
+          `/api/projects/${project.id}/diagrams/${def.id}`,
+          auth.token
+        )
+        if (!isMounted) return
+        setElementsRaw(full.elements)
+        setRelationsRaw(full.relations)
+        setNodes(buildNodes(full.elements))
+        setEdges(buildEdges(full.relations))
+        setSavingStatus('Guardado')
+      } catch (err) {
+        if (!isMounted) return
+        setSavingStatus('Error al cargar')
+        onError(err)
+      }
+    }
+
+    init()
+    return () => {
+      isMounted = false
     }
   }, [project.id, auth.token, buildNodes, buildEdges, setNodes, setEdges, onError])
-
-  useEffect(() => {
-    loadDiagramData()
-  }, [loadDiagramData])
 
   // Sincronizar nodos locales cuando cambian elementsRaw
   useEffect(() => {
@@ -216,11 +225,12 @@ export function UmlCanvas({ project, auth, onError }: Props) {
   // Al finalizar de arrastrar un nodo, persistir coordenadas en backend
   const handleNodeDragStop = useCallback(
     async (_event: unknown, node: UmlNodeType) => {
-      if (isReadOnly || !diagram) return
+      const currentDiagram = diagramRef.current
+      if (isReadOnly || !currentDiagram) return
       try {
         setSavingStatus('Sincronizando...')
         await request(
-          `/api/projects/${project.id}/diagrams/${diagram.id}/elements/positions`,
+          `/api/projects/${project.id}/diagrams/${currentDiagram.id}/elements/positions`,
           auth.token,
           {
             method: 'POST',
@@ -229,7 +239,6 @@ export function UmlCanvas({ project, auth, onError }: Props) {
             })
           }
         )
-        // Actualizar en el estado local
         setElementsRaw((prev) =>
           prev.map((e) =>
             e.id === node.id ? { ...e, posicionX: node.position.x, posicionY: node.position.y } : e
@@ -241,7 +250,7 @@ export function UmlCanvas({ project, auth, onError }: Props) {
         onError(err)
       }
     },
-    [isReadOnly, diagram, project.id, auth.token, onError]
+    [isReadOnly, project.id, auth.token, onError]
   )
 
   // Crear nuevo elemento en el centro
@@ -557,7 +566,7 @@ export function UmlCanvas({ project, auth, onError }: Props) {
           onConnect={handleConnect}
           onNodeDragStop={handleNodeDragStop}
           onEdgeClick={handleEdgeClick}
-          nodeTypes={nodeTypes}
+          nodeTypes={NODE_TYPES}
           nodesDraggable={!isReadOnly}
           nodesConnectable={!isReadOnly}
           elementsSelectable={true}

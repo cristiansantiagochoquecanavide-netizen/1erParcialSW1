@@ -1,14 +1,15 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useState } from 'react'
 import { UmlCanvas } from './uml/UmlCanvas'
 
 type Role = 'PROPIETARIO' | 'EDITOR' | 'LECTOR'
 type Project = { id: string; name: string; description: string | null; role: Role; createdAt: string }
 type Member = { id: string; userId: string; name: string; email: string; role: Role }
 type Auth = { token: string; name: string; email: string }
-const base = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080'
+const base = import.meta.env.VITE_API_BASE_URL !== undefined ? import.meta.env.VITE_API_BASE_URL : ''
 
 async function api<T>(path: string, token?: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${base}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers } })
+  const url = base ? `${base}${path}` : path
+  const response = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers } })
   if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.message ?? 'No se pudo completar la operación.') }
   return response.status === 204 ? undefined as T : response.json() as Promise<T>
 }
@@ -16,7 +17,7 @@ async function api<T>(path: string, token?: string, options: RequestInit = {}): 
 export default function App() {
   const [auth, setAuth] = useState<Auth | null>(() => { const raw = localStorage.getItem('case.auth'); return raw ? JSON.parse(raw) : null })
   const [registering, setRegistering] = useState(false), [projects, setProjects] = useState<Project[]>([]), [selected, setSelected] = useState<Project | null>(null), [message, setMessage] = useState<string | null>(null)
-  const error = (value: unknown) => setMessage(value instanceof Error ? value.message : 'Error inesperado.')
+  const error = useCallback((value: unknown) => setMessage(value instanceof Error ? value.message : 'Error inesperado.'), [])
   const load = () => auth && api<Project[]>('/api/projects', auth.token).then(setProjects).catch(error)
   useEffect(() => { load() }, [auth]) // eslint-disable-line react-hooks/exhaustive-deps
   if (!auth) return <AuthScreen registering={registering} setRegistering={setRegistering} onAuth={value => { localStorage.setItem('case.auth', JSON.stringify(value)); setAuth(value) }} onError={error} message={message} />
