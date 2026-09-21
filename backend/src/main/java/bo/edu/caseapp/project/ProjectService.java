@@ -46,6 +46,8 @@ public class ProjectService {
     requireOwner(membership(projectId, email)); ProjectMember target = memberForProject(projectId, memberId);
     if (target.getRole() == ProjectRole.PROPIETARIO) throw new BadRequestException("No se puede eliminar al propietario."); members.delete(target);
   }
+  public ProjectMember requireAccess(UUID projectId, String email) { return membership(projectId, email); }
+  public ProjectMember requireCanEdit(UUID projectId, String email) { ProjectMember member = membership(projectId, email); requireCanEdit(member); return member; }
   private User user(String email) { return users.findByEmailIgnoreCase(email).orElseThrow(() -> new NotFoundException("Usuario no encontrado.")); }
   private ProjectMember membership(UUID projectId, String email) { User user = user(email); return members.findByProjectIdAndUserId(projectId, user.getId()).orElseThrow(() -> new ForbiddenException("No tienes acceso a este proyecto.")); }
   private ProjectMember memberForProject(UUID projectId, UUID memberId) { ProjectMember member = members.findById(memberId).orElseThrow(() -> new NotFoundException("Colaborador no encontrado.")); if (!member.getProject().getId().equals(projectId)) throw new NotFoundException("Colaborador no encontrado."); return member; }

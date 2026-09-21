@@ -1,0 +1,124 @@
+package bo.edu.caseapp.uml;
+
+import bo.edu.caseapp.uml.UmlRequests.*;
+import bo.edu.caseapp.uml.UmlResponses.*;
+import jakarta.validation.Valid;
+import java.util.List;
+import java.util.UUID;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api/projects/{projectId}/diagrams")
+public class UmlController {
+  private final UmlService service;
+
+  public UmlController(UmlService service) {
+    this.service = service;
+  }
+
+  @GetMapping
+  public List<DiagramSummary> list(@PathVariable UUID projectId, Authentication auth) {
+    return service.listDiagrams(projectId, auth.getName());
+  }
+
+  @GetMapping("/default")
+  public DiagramSummary getOrCreateDefault(@PathVariable UUID projectId, Authentication auth) {
+    return service.getOrCreateDefaultDiagram(projectId, auth.getName());
+  }
+
+  @PostMapping
+  @ResponseStatus(HttpStatus.CREATED)
+  public DiagramSummary create(
+      @PathVariable UUID projectId,
+      Authentication auth,
+      @Valid @RequestBody CreateDiagram request
+  ) {
+    return service.createDiagram(projectId, auth.getName(), request);
+  }
+
+  @GetMapping("/{diagramId}")
+  public DiagramFullView get(
+      @PathVariable UUID projectId,
+      @PathVariable UUID diagramId,
+      Authentication auth
+  ) {
+    return service.getDiagram(projectId, diagramId, auth.getName());
+  }
+
+  @PutMapping("/{diagramId}")
+  public DiagramSummary update(
+      @PathVariable UUID projectId,
+      @PathVariable UUID diagramId,
+      Authentication auth,
+      @Valid @RequestBody UpdateDiagram request
+  ) {
+    return service.updateDiagram(projectId, diagramId, auth.getName(), request);
+  }
+
+  @DeleteMapping("/{diagramId}")
+  @ResponseStatus(HttpStatus.NO_CONTENT)
+  public void delete(
+      @PathVariable UUID projectId,
+      @PathVariable UUID diagramId,
+      Authentication auth
+  ) {
+    service.deleteDiagram(projectId, diagramId, auth.getName());
+  }
+
+  @PostMapping("/{diagramId}/elements")
+  @ResponseStatus(HttpStatus.OK)
+  public ElementDetail saveElement(
+      @PathVariable UUID projectId,
+      @PathVariable UUID diagramId,
+      Authentication auth,
+      @Valid @RequestBody SaveElement request
+  ) {
+    return service.saveElement(projectId, diagramId, auth.getName(), request);
+  }
+
+  @PostMapping("/{diagramId}/elements/positions")
+  @ResponseStatus(HttpStatus.NO_CONTENT)
+  public void syncPositions(
+      @PathVariable UUID projectId,
+      @PathVariable UUID diagramId,
+      Authentication auth,
+      @Valid @RequestBody SyncPositions request
+  ) {
+    service.syncPositions(projectId, diagramId, auth.getName(), request);
+  }
+
+  @DeleteMapping("/{diagramId}/elements/{elementId}")
+  @ResponseStatus(HttpStatus.NO_CONTENT)
+  public void deleteElement(
+      @PathVariable UUID projectId,
+      @PathVariable UUID diagramId,
+      @PathVariable UUID elementId,
+      Authentication auth
+  ) {
+    service.deleteElement(projectId, diagramId, auth.getName(), elementId);
+  }
+
+  @PostMapping("/{diagramId}/relations")
+  @ResponseStatus(HttpStatus.OK)
+  public RelationDetail saveRelation(
+      @PathVariable UUID projectId,
+      @PathVariable UUID diagramId,
+      Authentication auth,
+      @Valid @RequestBody SaveRelation request
+  ) {
+    return service.saveRelation(projectId, diagramId, auth.getName(), request);
+  }
+
+  @DeleteMapping("/{diagramId}/relations/{relationId}")
+  @ResponseStatus(HttpStatus.NO_CONTENT)
+  public void deleteRelation(
+      @PathVariable UUID projectId,
+      @PathVariable UUID diagramId,
+      @PathVariable UUID relationId,
+      Authentication auth
+  ) {
+    service.deleteRelation(projectId, diagramId, auth.getName(), relationId);
+  }
+}
