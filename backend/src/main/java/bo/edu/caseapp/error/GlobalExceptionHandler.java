@@ -16,7 +16,12 @@ public class GlobalExceptionHandler {
   public ResponseEntity<ApiError> handleForbidden(Exception exception) { return response(HttpStatus.FORBIDDEN, exception.getMessage()); }
   @ExceptionHandler({BadRequestException.class, MethodArgumentNotValidException.class})
   public ResponseEntity<ApiError> handleBadRequest(Exception exception) { return response(HttpStatus.BAD_REQUEST, exception.getMessage()); }
+  private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
   @ExceptionHandler(Exception.class)
-  public ResponseEntity<ApiError> handleUnexpected(Exception exception, HttpServletRequest request) { return response(HttpStatus.INTERNAL_SERVER_ERROR, "Ocurrió un error inesperado."); }
+  public ResponseEntity<ApiError> handleUnexpected(Exception exception, HttpServletRequest request) {
+    log.error("Unexpected error on request {}: ", request.getRequestURI(), exception);
+    return response(HttpStatus.INTERNAL_SERVER_ERROR, "Ocurrió un error inesperado: " + exception.getMessage());
+  }
   private ResponseEntity<ApiError> response(HttpStatus status, String message) { return ResponseEntity.status(status).body(new ApiError(Instant.now(), status.value(), status.getReasonPhrase(), message)); }
 }

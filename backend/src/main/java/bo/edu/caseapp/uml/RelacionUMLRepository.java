@@ -7,4 +7,5 @@ import org.springframework.data.jpa.repository.JpaRepository;
 public interface RelacionUMLRepository extends JpaRepository<RelacionUML, UUID> {
   List<RelacionUML> findByDiagramaId(UUID diagramaId);
   void deleteByElementoOrigenIdOrElementoDestinoId(UUID origenId, UUID destinoId);
+  void deleteByDiagramaId(UUID diagramaId);
 }

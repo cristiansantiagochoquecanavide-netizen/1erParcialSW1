@@ -6,4 +6,5 @@ import org.springframework.data.jpa.repository.JpaRepository;
 
 public interface ElementoUMLRepository extends JpaRepository<ElementoUML, UUID> {
   List<ElementoUML> findByDiagramaId(UUID diagramaId);
+  void deleteByDiagramaId(UUID diagramaId);
 }

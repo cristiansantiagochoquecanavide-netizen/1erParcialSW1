@@ -30,6 +30,11 @@ import { ClassEditorModal } from './ClassEditorModal'
 import { RelationModal } from './RelationModal'
 import { ValidationModal } from './ValidationModal'
 import { RelationalModal } from './RelationalModal'
+import { CodeGeneratorModal } from './CodeGeneratorModal'
+import { AiAssistantModal } from './AiAssistantModal'
+import { VersionsModal } from './VersionsModal'
+import { XmiModal } from './XmiModal'
+import { ApiTesterModal } from './ApiTesterModal'
 
 const base = import.meta.env.VITE_API_BASE_URL !== undefined ? import.meta.env.VITE_API_BASE_URL : ''
 const NODE_TYPES = { umlClass: UmlClassNode }
@@ -77,6 +82,12 @@ export function UmlCanvas({ project, auth, onError }: Props) {
   const [relationalSchema, setRelationalSchema] = useState<RelationalSchema | null>(null)
   const [validating, setValidating] = useState(false)
   const [generatingRelational, setGeneratingRelational] = useState(false)
+
+  const [showGenerator, setShowGenerator] = useState(false)
+  const [showAi, setShowAi] = useState(false)
+  const [showVersions, setShowVersions] = useState(false)
+  const [showXmi, setShowXmi] = useState(false)
+  const [showApiTester, setShowApiTester] = useState(false)
 
   // Referencias mutables para evitar dependencias circulares en callbacks y efectos
   const elementsRef = useRef(elementsRaw)
@@ -175,6 +186,17 @@ export function UmlCanvas({ project, auth, onError }: Props) {
       }
     })
   }, [])
+
+  const handleFullDiagramUpdated = useCallback(
+    (full: DiagramFullView) => {
+      setDiagram(full.diagram)
+      setElementsRaw(full.elements)
+      setRelationsRaw(full.relations)
+      setNodes(buildNodes(full.elements))
+      setEdges(buildEdges(full.relations))
+    },
+    [buildNodes, buildEdges, setNodes, setEdges]
+  )
 
   // Carga inicial única del diagrama al montar el componente
   useEffect(() => {
@@ -520,6 +542,53 @@ export function UmlCanvas({ project, auth, onError }: Props) {
             {generatingRelational ? 'Generando...' : '🗄️ Modelo Relacional'}
           </button>
 
+          <button
+            type="button"
+            className="uml-tool-btn feature-btn"
+            style={{ background: '#7c3aed', color: 'white' }}
+            onClick={() => setShowAi(true)}
+            title="Asistente de IA local para modelado por voz y comandos"
+          >
+            🤖 IA & Voz
+          </button>
+
+          <button
+            type="button"
+            className="uml-tool-btn feature-btn"
+            style={{ background: '#16a34a', color: 'white' }}
+            onClick={() => setShowGenerator(true)}
+            title="Generar Backend Spring Boot y Frontend React en archivo ZIP"
+          >
+            ⚡ Generar Software
+          </button>
+
+          <button
+            type="button"
+            className="uml-tool-btn feature-btn"
+            onClick={() => setShowVersions(true)}
+            title="Historial de versiones y snapshots del diagrama"
+          >
+            🕒 Versiones
+          </button>
+
+          <button
+            type="button"
+            className="uml-tool-btn feature-btn"
+            onClick={() => setShowXmi(true)}
+            title="Exportar/Importar XMI para Enterprise Architect"
+          >
+            📦 XMI
+          </button>
+
+          <button
+            type="button"
+            className="uml-tool-btn feature-btn"
+            onClick={() => setShowApiTester(true)}
+            title="Probar endpoints de la API generada por REST o voz"
+          >
+            🧪 Probar API
+          </button>
+
           {!isReadOnly && (
             <>
               <span className="toolbar-divider" />
@@ -629,6 +698,65 @@ export function UmlCanvas({ project, auth, onError }: Props) {
           schema={relationalSchema}
           projectName={project.name}
           onClose={() => setRelationalSchema(null)}
+        />
+      )}
+
+      {/* Modal Generador de Software (CU14, CU15, CU16) */}
+      {showGenerator && diagram && (
+        <CodeGeneratorModal
+          projectName={project.name}
+          diagramId={diagram.id}
+          projectId={project.id}
+          token={auth.token}
+          onClose={() => setShowGenerator(false)}
+          onError={onError}
+        />
+      )}
+
+      {/* Modal Asistente IA y Voz (CU10, CU11, CU12) */}
+      {showAi && diagram && (
+        <AiAssistantModal
+          projectId={project.id}
+          diagramId={diagram.id}
+          token={auth.token}
+          onClose={() => setShowAi(false)}
+          onDiagramUpdated={handleFullDiagramUpdated}
+          onError={onError}
+        />
+      )}
+
+      {/* Modal de Versiones (CU09) */}
+      {showVersions && diagram && (
+        <VersionsModal
+          projectId={project.id}
+          diagramId={diagram.id}
+          token={auth.token}
+          isReadOnly={isReadOnly}
+          onClose={() => setShowVersions(false)}
+          onRestored={handleFullDiagramUpdated}
+          onError={onError}
+        />
+      )}
+
+      {/* Modal de Interoperabilidad XMI (CU13) */}
+      {showXmi && diagram && (
+        <XmiModal
+          projectId={project.id}
+          diagramId={diagram.id}
+          diagramName={diagram.nombre}
+          token={auth.token}
+          isReadOnly={isReadOnly}
+          onClose={() => setShowXmi(false)}
+          onDiagramUpdated={handleFullDiagramUpdated}
+          onError={onError}
+        />
+      )}
+
+      {/* Consola de Pruebas de API */}
+      {showApiTester && (
+        <ApiTesterModal
+          elements={elementsRaw}
+          onClose={() => setShowApiTester(false)}
         />
       )}
     </div>

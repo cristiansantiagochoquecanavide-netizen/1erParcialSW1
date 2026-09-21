@@ -1,0 +1,29 @@
+package bo.edu.caseapp.versioning;
+
+import java.time.Instant;
+import java.util.UUID;
+
+public final class VersionResponses {
+  private VersionResponses() {}
+
+  public record VersionSummary(
+      UUID id,
+      UUID diagramaId,
+      int numeroVersion,
+      String descripcion,
+      String autorNombre,
+      String autorEmail,
+      Instant fecha
+  ) {}
+
+  public record VersionDetail(
+      UUID id,
+      UUID diagramaId,
+      int numeroVersion,
+      String descripcion,
+      String snapshotJson,
+      String autorNombre,
+      String autorEmail,
+      Instant fecha
+  ) {}
+}

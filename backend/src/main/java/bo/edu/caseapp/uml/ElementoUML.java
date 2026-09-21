@@ -59,6 +59,12 @@ public class ElementoUML {
     }
   }
 
+  public void setPropiedadesJson(String propiedadesJson) {
+    if (propiedadesJson != null && !propiedadesJson.isBlank()) {
+      this.propiedadesJson = propiedadesJson;
+    }
+  }
+
   public void updatePosition(double posicionX, double posicionY) {
     this.posicionX = posicionX;
     this.posicionY = posicionY;
