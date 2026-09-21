@@ -61,6 +61,50 @@ export type DiagramFullView = {
   relations: RelationDetail[]
 }
 
+export type ValidationIssue = {
+  severity: 'ERROR' | 'WARNING' | 'INFO'
+  elementoId: string | null
+  elementoNombre: string | null
+  mensaje: string
+  sugerencia: string
+}
+
+export type ValidationReport = {
+  valid: boolean
+  errorCount: number
+  warningCount: number
+  issues: ValidationIssue[]
+}
+
+export type RelationalColumn = {
+  name: string
+  sqlType: string
+  primaryKey: boolean
+  nullable: boolean
+  unique: boolean
+  defaultValue: string | null
+}
+
+export type RelationalForeignKey = {
+  constraintName: string
+  columnName: string
+  targetTable: string
+  targetColumn: string
+  cascadeDelete: boolean
+}
+
+export type RelationalTable = {
+  name: string
+  umlSourceClass: string
+  columns: RelationalColumn[]
+  foreignKeys: RelationalForeignKey[]
+}
+
+export type RelationalSchema = {
+  tables: RelationalTable[]
+  sqlDdl: string
+}
+
 export function parseUmlProperties(json?: string | null): UmlProperties {
   if (!json) return { attributes: [], methods: [] }
   try {

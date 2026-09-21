@@ -13,18 +13,24 @@ import bo.edu.caseapp.uml.UmlRequests.CreateDiagram;
 import bo.edu.caseapp.uml.UmlRequests.SaveElement;
 import bo.edu.caseapp.uml.UmlResponses.DiagramSummary;
 import bo.edu.caseapp.uml.UmlResponses.ElementDetail;
+import bo.edu.caseapp.uml.relational.RelationalModelService;
+import bo.edu.caseapp.uml.relational.RelationalSchema;
+import bo.edu.caseapp.uml.validation.UmlValidatorService;
+import bo.edu.caseapp.uml.validation.ValidationReport;
 import bo.edu.caseapp.user.User;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 
 class UmlServiceTest {
   private DiagramaClaseRepository diagrams;
   private ElementoUMLRepository elements;
   private RelacionUMLRepository relations;
   private ProjectService projectService;
+  private UmlValidatorService validatorService;
+  private RelationalModelService relationalModelService;
   private UmlService service;
 
   private UUID projectId;
@@ -39,7 +45,17 @@ class UmlServiceTest {
     elements = mock(ElementoUMLRepository.class);
     relations = mock(RelacionUMLRepository.class);
     projectService = mock(ProjectService.class);
-    service = new UmlService(diagrams, elements, relations, projectService);
+    validatorService = new UmlValidatorService();
+    relationalModelService = new RelationalModelService();
+
+    service = new UmlService(
+        diagrams,
+        elements,
+        relations,
+        projectService,
+        validatorService,
+        relationalModelService
+    );
 
     projectId = UUID.randomUUID();
     diagramId = UUID.randomUUID();
@@ -122,5 +138,47 @@ class UmlServiceTest {
     assertThrows(ForbiddenException.class, () ->
         service.saveElement(projectId, diagramId, "lector@example.com", request)
     );
+  }
+
+  @Test
+  void validateDiagram_validatesElementsAndRelations() {
+    ProjectMember member = new ProjectMember(project, project.getCreator(), ProjectRole.PROPIETARIO);
+    when(projectService.requireAccess(projectId, email)).thenReturn(member);
+    when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
+
+    ElementoUML el1 = new ElementoUML(diagram, TipoElementoUML.CLASE, "Cliente", 0, 0, "{\"attributes\":[{\"name\":\"id\",\"type\":\"UUID\"}]}");
+    ElementoUML el2 = new ElementoUML(diagram, TipoElementoUML.CLASE, "Pedido", 0, 0, "{\"attributes\":[{\"name\":\"id\",\"type\":\"UUID\"}]}");
+
+    when(elements.findByDiagramaId(diagramId)).thenReturn(List.of(el1, el2));
+    when(relations.findByDiagramaId(diagramId)).thenReturn(List.of());
+
+    ValidationReport report = service.validateDiagram(projectId, diagramId, email);
+
+    assertNotNull(report);
+    assertTrue(report.valid());
+    assertEquals(0, report.errorCount());
+  }
+
+  @Test
+  void generateRelationalSchema_generatesTablesAndDdl() {
+    ProjectMember member = new ProjectMember(project, project.getCreator(), ProjectRole.PROPIETARIO);
+    when(projectService.requireAccess(projectId, email)).thenReturn(member);
+    when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
+
+    ElementoUML cliente = new ElementoUML(diagram, TipoElementoUML.CLASE, "Cliente", 0, 0, "{\"attributes\":[{\"name\":\"nombre\",\"type\":\"String\"}]}");
+    ElementoUML pedido = new ElementoUML(diagram, TipoElementoUML.CLASE, "Pedido", 0, 0, "{\"attributes\":[{\"name\":\"total\",\"type\":\"Double\"}]}");
+
+    RelacionUML rel = new RelacionUML(diagram, cliente, pedido, "realiza", TipoRelacionUML.ASOCIACION, "1", "*");
+
+    when(elements.findByDiagramaId(diagramId)).thenReturn(List.of(cliente, pedido));
+    when(relations.findByDiagramaId(diagramId)).thenReturn(List.of(rel));
+
+    RelationalSchema schema = service.generateRelationalSchema(projectId, diagramId, email);
+
+    assertNotNull(schema);
+    assertEquals(2, schema.tables().size());
+    assertTrue(schema.sqlDdl().contains("CREATE TABLE cliente"));
+    assertTrue(schema.sqlDdl().contains("CREATE TABLE pedido"));
+    assertTrue(schema.sqlDdl().contains("cliente_id UUID"));
   }
 }

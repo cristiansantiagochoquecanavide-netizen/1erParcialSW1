@@ -21,11 +21,15 @@ import {
   Role,
   TipoElementoUML,
   TipoRelacionUML,
-  UmlProperties
+  UmlProperties,
+  ValidationReport,
+  RelationalSchema
 } from './types'
 import { UmlClassNode, UmlNodeType } from './UmlClassNode'
 import { ClassEditorModal } from './ClassEditorModal'
 import { RelationModal } from './RelationModal'
+import { ValidationModal } from './ValidationModal'
+import { RelationalModal } from './RelationalModal'
 
 const base = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080'
 
@@ -67,6 +71,10 @@ export function UmlCanvas({ project, auth, onError }: Props) {
   const [editingElement, setEditingElement] = useState<ElementDetail | null>(null)
   const [pendingConnection, setPendingConnection] = useState<Connection | null>(null)
   const [editingRelation, setEditingRelation] = useState<RelationDetail | null>(null)
+  const [validationReport, setValidationReport] = useState<ValidationReport | null>(null)
+  const [relationalSchema, setRelationalSchema] = useState<RelationalSchema | null>(null)
+  const [validating, setValidating] = useState(false)
+  const [generatingRelational, setGeneratingRelational] = useState(false)
 
   const nodeTypes = useMemo(() => ({ umlClass: UmlClassNode }), [])
 
@@ -438,6 +446,38 @@ export function UmlCanvas({ project, auth, onError }: Props) {
     return elementsRaw.find((e) => e.id === targetId)?.nombre ?? 'Elemento'
   }, [pendingConnection, editingRelation, elementsRaw])
 
+  async function handleValidateDiagram() {
+    if (!diagram) return
+    try {
+      setValidating(true)
+      const report = await request<ValidationReport>(
+        `/api/projects/${project.id}/diagrams/${diagram.id}/validate`,
+        auth.token
+      )
+      setValidationReport(report)
+    } catch (err) {
+      onError(err)
+    } finally {
+      setValidating(false)
+    }
+  }
+
+  async function handleGenerateRelational() {
+    if (!diagram) return
+    try {
+      setGeneratingRelational(true)
+      const schema = await request<RelationalSchema>(
+        `/api/projects/${project.id}/diagrams/${diagram.id}/relational`,
+        auth.token
+      )
+      setRelationalSchema(schema)
+    } catch (err) {
+      onError(err)
+    } finally {
+      setGeneratingRelational(false)
+    }
+  }
+
   return (
     <div className="uml-workspace-container">
       {/* Barra de herramientas superior */}
@@ -450,38 +490,61 @@ export function UmlCanvas({ project, auth, onError }: Props) {
           {isReadOnly && <span className="readonly-badge">Modo Lectura</span>}
         </div>
 
-        {!isReadOnly && (
-          <div className="uml-toolbar-actions">
-            <button
-              type="button"
-              className="uml-tool-btn"
-              onClick={() => handleAddElement('CLASE')}
-            >
-              + Clase
-            </button>
-            <button
-              type="button"
-              className="uml-tool-btn secondary"
-              onClick={() => handleAddElement('INTERFAZ')}
-            >
-              + Interfaz
-            </button>
-            <button
-              type="button"
-              className="uml-tool-btn secondary"
-              onClick={() => handleAddElement('CLASE_ABSTRACTA')}
-            >
-              + Abstracta
-            </button>
-            <button
-              type="button"
-              className="uml-tool-btn secondary"
-              onClick={() => handleAddElement('ENUMERACION')}
-            >
-              + Enum
-            </button>
-          </div>
-        )}
+        <div className="uml-toolbar-actions">
+          {/* Botones de Modelado e Ingeniería (CU05 y CU06) */}
+          <button
+            type="button"
+            className="uml-tool-btn feature-btn"
+            disabled={validating}
+            onClick={handleValidateDiagram}
+            title="Validar consistencia y reglas semánticas del modelo UML"
+          >
+            {validating ? 'Validando...' : '🔍 Validar Modelo'}
+          </button>
+          <button
+            type="button"
+            className="uml-tool-btn feature-btn primary"
+            disabled={generatingRelational}
+            onClick={handleGenerateRelational}
+            title="Transformar diagrama a tablas SQL y PostgreSQL DDL"
+          >
+            {generatingRelational ? 'Generando...' : '🗄️ Modelo Relacional'}
+          </button>
+
+          {!isReadOnly && (
+            <>
+              <span className="toolbar-divider" />
+              <button
+                type="button"
+                className="uml-tool-btn"
+                onClick={() => handleAddElement('CLASE')}
+              >
+                + Clase
+              </button>
+              <button
+                type="button"
+                className="uml-tool-btn secondary"
+                onClick={() => handleAddElement('INTERFAZ')}
+              >
+                + Interfaz
+              </button>
+              <button
+                type="button"
+                className="uml-tool-btn secondary"
+                onClick={() => handleAddElement('CLASE_ABSTRACTA')}
+              >
+                + Abstracta
+              </button>
+              <button
+                type="button"
+                className="uml-tool-btn secondary"
+                onClick={() => handleAddElement('ENUMERACION')}
+              >
+                + Enum
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Contenedor React Flow */}
@@ -539,6 +602,24 @@ export function UmlCanvas({ project, auth, onError }: Props) {
           onSave={handleUpdateRelation}
           onDelete={handleDeleteRelation}
           onClose={() => setEditingRelation(null)}
+        />
+      )}
+
+      {/* Modal de Validación UML (CU05) */}
+      {validationReport && (
+        <ValidationModal
+          report={validationReport}
+          onProceedToRelational={handleGenerateRelational}
+          onClose={() => setValidationReport(null)}
+        />
+      )}
+
+      {/* Modal de Modelo Relacional Generado (CU06) */}
+      {relationalSchema && (
+        <RelationalModal
+          schema={relationalSchema}
+          projectName={project.name}
+          onClose={() => setRelationalSchema(null)}
         />
       )}
     </div>

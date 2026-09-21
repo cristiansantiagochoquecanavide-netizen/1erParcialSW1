@@ -2,6 +2,8 @@ package bo.edu.caseapp.uml;
 
 import bo.edu.caseapp.uml.UmlRequests.*;
 import bo.edu.caseapp.uml.UmlResponses.*;
+import bo.edu.caseapp.uml.relational.RelationalSchema;
+import bo.edu.caseapp.uml.validation.ValidationReport;
 import jakarta.validation.Valid;
 import java.util.List;
 import java.util.UUID;
@@ -45,6 +47,24 @@ public class UmlController {
       Authentication auth
   ) {
     return service.getDiagram(projectId, diagramId, auth.getName());
+  }
+
+  @GetMapping("/{diagramId}/validate")
+  public ValidationReport validate(
+      @PathVariable UUID projectId,
+      @PathVariable UUID diagramId,
+      Authentication auth
+  ) {
+    return service.validateDiagram(projectId, diagramId, auth.getName());
+  }
+
+  @GetMapping("/{diagramId}/relational")
+  public RelationalSchema getRelational(
+      @PathVariable UUID projectId,
+      @PathVariable UUID diagramId,
+      Authentication auth
+  ) {
+    return service.generateRelationalSchema(projectId, diagramId, auth.getName());
   }
 
   @PutMapping("/{diagramId}")

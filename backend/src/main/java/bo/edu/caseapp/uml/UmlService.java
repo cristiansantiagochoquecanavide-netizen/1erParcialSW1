@@ -7,6 +7,10 @@ import bo.edu.caseapp.project.ProjectMember;
 import bo.edu.caseapp.project.ProjectService;
 import bo.edu.caseapp.uml.UmlRequests.*;
 import bo.edu.caseapp.uml.UmlResponses.*;
+import bo.edu.caseapp.uml.relational.RelationalModelService;
+import bo.edu.caseapp.uml.relational.RelationalSchema;
+import bo.edu.caseapp.uml.validation.UmlValidatorService;
+import bo.edu.caseapp.uml.validation.ValidationReport;
 import java.util.*;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -18,17 +22,23 @@ public class UmlService {
   private final ElementoUMLRepository elements;
   private final RelacionUMLRepository relations;
   private final ProjectService projectService;
+  private final UmlValidatorService validatorService;
+  private final RelationalModelService relationalModelService;
 
   public UmlService(
       DiagramaClaseRepository diagrams,
       ElementoUMLRepository elements,
       RelacionUMLRepository relations,
-      ProjectService projectService
+      ProjectService projectService,
+      UmlValidatorService validatorService,
+      RelationalModelService relationalModelService
   ) {
     this.diagrams = diagrams;
     this.elements = elements;
     this.relations = relations;
     this.projectService = projectService;
+    this.validatorService = validatorService;
+    this.relationalModelService = relationalModelService;
   }
 
   @Transactional(readOnly = true)
@@ -63,6 +73,24 @@ public class UmlService {
     List<ElementDetail> elementDetails = elements.findByDiagramaId(diagramId).stream().map(this::elementDetail).toList();
     List<RelationDetail> relationDetails = relations.findByDiagramaId(diagramId).stream().map(this::relationDetail).toList();
     return new DiagramFullView(summary(diagram), elementDetails, relationDetails);
+  }
+
+  @Transactional(readOnly = true)
+  public ValidationReport validateDiagram(UUID projectId, UUID diagramId, String email) {
+    projectService.requireAccess(projectId, email);
+    findDiagram(projectId, diagramId);
+    List<ElementoUML> elList = elements.findByDiagramaId(diagramId);
+    List<RelacionUML> relList = relations.findByDiagramaId(diagramId);
+    return validatorService.validate(elList, relList);
+  }
+
+  @Transactional(readOnly = true)
+  public RelationalSchema generateRelationalSchema(UUID projectId, UUID diagramId, String email) {
+    projectService.requireAccess(projectId, email);
+    findDiagram(projectId, diagramId);
+    List<ElementoUML> elList = elements.findByDiagramaId(diagramId);
+    List<RelacionUML> relList = relations.findByDiagramaId(diagramId);
+    return relationalModelService.generateSchema(elList, relList);
   }
 
   public DiagramSummary updateDiagram(UUID projectId, UUID diagramId, String email, UpdateDiagram request) {
