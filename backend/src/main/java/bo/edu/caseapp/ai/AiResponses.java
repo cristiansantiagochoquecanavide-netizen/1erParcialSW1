@@ -19,6 +19,14 @@ public final class AiResponses {
       String suggestion
   ) {}
 
+  public record ImageReconstructionResponse(
+      boolean success,
+      String message,
+      int classesDetected,
+      int relationsDetected,
+      DiagramFullView updatedDiagram
+  ) {}
+
   public record InteractionHistoryItem(
       UUID id,
       String tipoInteraccion,

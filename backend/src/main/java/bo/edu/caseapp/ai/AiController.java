@@ -42,6 +42,16 @@ public class AiController {
     return aiService.chat(projectId, diagramId, auth.getName(), request);
   }
 
+  @PostMapping("/reconstruct-image")
+  public AiResponses.ImageReconstructionResponse reconstructFromImage(
+      @PathVariable UUID projectId,
+      @PathVariable UUID diagramId,
+      Authentication auth,
+      @Valid @RequestBody AiRequests.ReconstructImageRequest request
+  ) {
+    return aiService.reconstructFromImage(projectId, diagramId, auth.getName(), request);
+  }
+
   @GetMapping("/history")
   public List<InteractionHistoryItem> history(
       @PathVariable UUID projectId,

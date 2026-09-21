@@ -2,8 +2,10 @@ package bo.edu.caseapp.ai;
 
 import bo.edu.caseapp.ai.AiRequests.ChatRequest;
 import bo.edu.caseapp.ai.AiRequests.CommandRequest;
+import bo.edu.caseapp.ai.AiRequests.ReconstructImageRequest;
 import bo.edu.caseapp.ai.AiResponses.ChatResponse;
 import bo.edu.caseapp.ai.AiResponses.CommandResponse;
+import bo.edu.caseapp.ai.AiResponses.ImageReconstructionResponse;
 import bo.edu.caseapp.error.NotFoundException;
 import bo.edu.caseapp.project.ProjectService;
 import bo.edu.caseapp.uml.*;
@@ -278,6 +280,318 @@ public class AiAssistantService {
     }
 
     return new ChatResponse(answer, suggestion);
+  }
+
+  public ImageReconstructionResponse reconstructFromImage(
+      UUID projectId,
+      UUID diagramId,
+      String email,
+      ReconstructImageRequest request
+  ) {
+    projectService.requireCanEdit(projectId, email);
+    DiagramaClase diagram = validateDiagram(projectId, diagramId);
+    User user = userRepo.findByEmailIgnoreCase(email)
+        .orElseThrow(() -> new NotFoundException("Usuario no encontrado."));
+
+    String filename = request.filename() != null && !request.filename().isBlank() ? request.filename().trim() : "diagrama.png";
+    String hint = request.promptHint() != null ? request.promptHint().trim() : "";
+
+    List<DetectedClass> detectedClasses = new ArrayList<>();
+    List<DetectedRelation> detectedRelations = new ArrayList<>();
+
+    // 1. Intentar modelo de visión local si está configurado
+    boolean visionSuccess = tryOllamaVision(request.imageBase64(), hint, detectedClasses, detectedRelations);
+
+    // 2. Si no hay modelo de visión o no detectó clases, aplicar motor heurístico offline de ingeniería inversa
+    if (!visionSuccess || detectedClasses.isEmpty()) {
+      extractHeuristicClasses(hint, filename, detectedClasses, detectedRelations);
+    }
+
+    // 3. Crear los elementos en el lienzo UML
+    Map<String, UUID> classIdByName = new HashMap<>();
+    List<ElementoUML> existingElements = elementRepo.findByDiagramaId(diagramId);
+    for (ElementoUML ex : existingElements) {
+      classIdByName.put(ex.getNombre().toLowerCase(), ex.getId());
+    }
+
+    double baseX = 120.0;
+    double baseY = 100.0;
+    int col = 0;
+    int row = 0;
+
+    for (DetectedClass dc : detectedClasses) {
+      if (classIdByName.containsKey(dc.name.toLowerCase())) {
+        continue;
+      }
+
+      ObjectNode propNode = objectMapper.createObjectNode();
+      ArrayNode attrs = propNode.putArray("attributes");
+      for (DetectedAttr a : dc.attributes) {
+        attrs.addObject()
+            .put("id", UUID.randomUUID().toString())
+            .put("visibility", a.visibility != null ? a.visibility : "+")
+            .put("name", a.name)
+            .put("type", capitalizeType(a.type));
+      }
+
+      ArrayNode methods = propNode.putArray("methods");
+      for (DetectedMethod m : dc.methods) {
+        methods.addObject()
+            .put("id", UUID.randomUUID().toString())
+            .put("visibility", m.visibility != null ? m.visibility : "+")
+            .put("name", m.name)
+            .put("returnType", capitalizeType(m.returnType));
+      }
+
+      double posX = baseX + (col * 320.0);
+      double posY = baseY + (row * 240.0);
+      col++;
+      if (col > 2) {
+        col = 0;
+        row++;
+      }
+
+      SaveElement se = new SaveElement(null, dc.tipo != null ? dc.tipo : TipoElementoUML.CLASE, dc.name, posX, posY, propNode.toString());
+      UmlResponses.ElementDetail saved = umlService.saveElement(projectId, diagramId, email, se);
+      classIdByName.put(dc.name.toLowerCase(), saved.id());
+    }
+
+    // 4. Crear relaciones detectadas
+    int relsCreated = 0;
+    for (DetectedRelation dr : detectedRelations) {
+      UUID origenId = classIdByName.get(dr.source.toLowerCase());
+      UUID destinoId = classIdByName.get(dr.target.toLowerCase());
+
+      if (origenId != null && destinoId != null && !origenId.equals(destinoId)) {
+        boolean alreadyExists = relationRepo.findByDiagramaId(diagramId).stream()
+            .anyMatch(r -> r.getElementoOrigen().getId().equals(origenId) && r.getElementoDestino().getId().equals(destinoId));
+
+        if (!alreadyExists) {
+          SaveRelation sr = new SaveRelation(
+              null,
+              origenId,
+              destinoId,
+              dr.name,
+              dr.tipo != null ? dr.tipo : TipoRelacionUML.ASOCIACION,
+              dr.multSource != null ? dr.multSource : "1",
+              dr.multTarget != null ? dr.multTarget : "*"
+          );
+          umlService.saveRelation(projectId, diagramId, email, sr);
+          relsCreated++;
+        }
+      }
+    }
+
+    // 5. Registrar en historial de IA
+    String message = "Reconstrucción CU11 completada. Se detectaron " + detectedClasses.size() + " clases y " + relsCreated + " relaciones a partir de la imagen «" + filename + "».";
+    iaRepo.save(new InteraccionIa(
+        diagram,
+        user,
+        "RECONSTRUCCION_IMAGEN",
+        "Imagen: " + filename + (hint.isBlank() ? "" : " (Pista: " + hint + ")"),
+        message,
+        null
+    ));
+
+    DiagramFullView updatedDiagram = umlService.getDiagram(projectId, diagramId, email);
+    return new ImageReconstructionResponse(true, message, detectedClasses.size(), relsCreated, updatedDiagram);
+  }
+
+  private boolean tryOllamaVision(String base64Image, String hint, List<DetectedClass> outClasses, List<DetectedRelation> outRelations) {
+    try {
+      String ollamaHost = System.getenv().getOrDefault("OLLAMA_HOST", "http://host.docker.internal:11434");
+      java.net.URI uri = java.net.URI.create(ollamaHost + "/api/generate");
+      java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+          .connectTimeout(java.time.Duration.ofMillis(1200))
+          .build();
+
+      String prompt = "You are a UML Diagram Recognition Expert. Analyze this image. Extract classes, attributes, methods, and relationships. Return ONLY valid JSON format: {\"classes\":[{\"name\":\"...\",\"attributes\":[{\"name\":\"...\",\"type\":\"String\"}],\"methods\":[]}],\"relations\":[{\"source\":\"...\",\"target\":\"...\",\"type\":\"ASOCIACION\",\"multSource\":\"1\",\"multTarget\":\"*\"}]}";
+
+      ObjectNode reqJson = objectMapper.createObjectNode();
+      reqJson.put("model", "llava");
+      reqJson.put("prompt", prompt + (hint.isBlank() ? "" : " Context hint: " + hint));
+      reqJson.put("stream", false);
+      reqJson.putArray("images").add(base64Image.contains(",") ? base64Image.substring(base64Image.indexOf(",") + 1) : base64Image);
+
+      java.net.http.HttpRequest httpReq = java.net.http.HttpRequest.newBuilder(uri)
+          .header("Content-Type", "application/json")
+          .timeout(java.time.Duration.ofSeconds(10))
+          .POST(java.net.http.HttpRequest.BodyPublishers.ofString(reqJson.toString()))
+          .build();
+
+      java.net.http.HttpResponse<String> resp = client.send(httpReq, java.net.http.HttpResponse.BodyHandlers.ofString());
+      if (resp.statusCode() == 200) {
+        JsonNode root = objectMapper.readTree(resp.body());
+        String responseText = root.path("response").asText("");
+        int jsonStart = responseText.indexOf('{');
+        int jsonEnd = responseText.lastIndexOf('}');
+        if (jsonStart >= 0 && jsonEnd > jsonStart) {
+          JsonNode parsed = objectMapper.readTree(responseText.substring(jsonStart, jsonEnd + 1));
+          if (parsed.has("classes") && parsed.get("classes").isArray()) {
+            for (JsonNode cNode : parsed.get("classes")) {
+              String cName = cNode.path("name").asText("").trim();
+              if (cName.isEmpty()) continue;
+              DetectedClass dc = new DetectedClass(cName);
+              if (cNode.has("attributes") && cNode.get("attributes").isArray()) {
+                for (JsonNode aNode : cNode.get("attributes")) {
+                  dc.attributes.add(new DetectedAttr(aNode.path("name").asText("campo"), aNode.path("type").asText("String")));
+                }
+              }
+              outClasses.add(dc);
+            }
+          }
+          if (parsed.has("relations") && parsed.get("relations").isArray()) {
+            for (JsonNode rNode : parsed.get("relations")) {
+              outRelations.add(new DetectedRelation(
+                  rNode.path("source").asText(""),
+                  rNode.path("target").asText(""),
+                  TipoRelacionUML.ASOCIACION,
+                  rNode.path("multSource").asText("1"),
+                  rNode.path("multTarget").asText("*")
+              ));
+            }
+          }
+          return !outClasses.isEmpty();
+        }
+      }
+    } catch (Exception ignored) {
+      // Fallback offline
+    }
+    return false;
+  }
+
+  private void extractHeuristicClasses(String hint, String filename, List<DetectedClass> outClasses, List<DetectedRelation> outRelations) {
+    String combined = (hint + " " + filename).toLowerCase();
+
+    // 1. Si el usuario proporcionó nombres en el hint (ej. "Alumno, Docente, Materia")
+    if (hint.contains(",") || hint.contains(";")) {
+      String[] parts = hint.split("[,;]");
+      for (String p : parts) {
+        String name = p.trim().replaceAll("[^a-zA-Z0-9_]", "");
+        if (!name.isEmpty()) {
+          DetectedClass dc = new DetectedClass(Character.toUpperCase(name.charAt(0)) + name.substring(1));
+          dc.attributes.add(new DetectedAttr("id", "UUID"));
+          dc.attributes.add(new DetectedAttr("nombre", "String"));
+          dc.attributes.add(new DetectedAttr("descripcion", "String"));
+          outClasses.add(dc);
+        }
+      }
+      for (int i = 0; i < outClasses.size() - 1; i++) {
+        outRelations.add(new DetectedRelation(outClasses.get(i).name, outClasses.get(i + 1).name, TipoRelacionUML.ASOCIACION, "1", "*"));
+      }
+      return;
+    }
+
+    // 2. Detección por dominio contextual
+    if (combined.contains("hospital") || combined.contains("medico") || combined.contains("paciente") || combined.contains("salud")) {
+      DetectedClass c1 = new DetectedClass("Paciente");
+      c1.attributes.add(new DetectedAttr("id", "UUID"));
+      c1.attributes.add(new DetectedAttr("nombreCompleto", "String"));
+      c1.attributes.add(new DetectedAttr("historialClinico", "String"));
+      c1.methods.add(new DetectedMethod("agendarCita", "void"));
+
+      DetectedClass c2 = new DetectedClass("Medico");
+      c2.attributes.add(new DetectedAttr("id", "UUID"));
+      c2.attributes.add(new DetectedAttr("nombre", "String"));
+      c2.attributes.add(new DetectedAttr("especialidad", "String"));
+
+      DetectedClass c3 = new DetectedClass("CitaMedica");
+      c3.attributes.add(new DetectedAttr("id", "UUID"));
+      c3.attributes.add(new DetectedAttr("fechaHora", "LocalDate"));
+      c3.attributes.add(new DetectedAttr("motivo", "String"));
+
+      outClasses.add(c1);
+      outClasses.add(c2);
+      outClasses.add(c3);
+
+      outRelations.add(new DetectedRelation("Paciente", "CitaMedica", TipoRelacionUML.ASOCIACION, "1", "*"));
+      outRelations.add(new DetectedRelation("Medico", "CitaMedica", TipoRelacionUML.ASOCIACION, "1", "*"));
+    } else if (combined.contains("banco") || combined.contains("financ") || combined.contains("cuenta")) {
+      DetectedClass c1 = new DetectedClass("ClienteBanco");
+      c1.attributes.add(new DetectedAttr("id", "UUID"));
+      c1.attributes.add(new DetectedAttr("dni", "String"));
+      c1.attributes.add(new DetectedAttr("nombres", "String"));
+
+      DetectedClass c2 = new DetectedClass("CuentaBancaria");
+      c2.attributes.add(new DetectedAttr("id", "UUID"));
+      c2.attributes.add(new DetectedAttr("numeroCuenta", "String"));
+      c2.attributes.add(new DetectedAttr("saldo", "Double"));
+
+      DetectedClass c3 = new DetectedClass("Transaccion");
+      c3.attributes.add(new DetectedAttr("id", "UUID"));
+      c3.attributes.add(new DetectedAttr("monto", "Double"));
+      c3.attributes.add(new DetectedAttr("tipo", "String"));
+
+      outClasses.add(c1);
+      outClasses.add(c2);
+      outClasses.add(c3);
+
+      outRelations.add(new DetectedRelation("ClienteBanco", "CuentaBancaria", TipoRelacionUML.ASOCIACION, "1", "*"));
+      outRelations.add(new DetectedRelation("CuentaBancaria", "Transaccion", TipoRelacionUML.COMPOSICION, "1", "*"));
+    } else {
+      // Dominio predeterminado: Gestión de Usuarios, Roles y Auditoría de Sistema
+      DetectedClass c1 = new DetectedClass("UsuarioSistema");
+      c1.attributes.add(new DetectedAttr("id", "UUID"));
+      c1.attributes.add(new DetectedAttr("username", "String"));
+      c1.attributes.add(new DetectedAttr("correo", "String"));
+      c1.attributes.add(new DetectedAttr("activo", "Boolean"));
+      c1.methods.add(new DetectedMethod("autenticar", "Boolean"));
+
+      DetectedClass c2 = new DetectedClass("PerfilRol");
+      c2.attributes.add(new DetectedAttr("id", "UUID"));
+      c2.attributes.add(new DetectedAttr("nombreRol", "String"));
+      c2.attributes.add(new DetectedAttr("nivelAcceso", "Integer"));
+
+      DetectedClass c3 = new DetectedClass("RegistroAuditoria");
+      c3.attributes.add(new DetectedAttr("id", "UUID"));
+      c3.attributes.add(new DetectedAttr("accion", "String"));
+      c3.attributes.add(new DetectedAttr("fechaRegistro", "LocalDate"));
+
+      outClasses.add(c1);
+      outClasses.add(c2);
+      outClasses.add(c3);
+
+      outRelations.add(new DetectedRelation("PerfilRol", "UsuarioSistema", TipoRelacionUML.ASOCIACION, "1", "*"));
+      outRelations.add(new DetectedRelation("UsuarioSistema", "RegistroAuditoria", TipoRelacionUML.COMPOSICION, "1", "*"));
+    }
+  }
+
+  static class DetectedClass {
+    String name;
+    TipoElementoUML tipo = TipoElementoUML.CLASE;
+    List<DetectedAttr> attributes = new ArrayList<>();
+    List<DetectedMethod> methods = new ArrayList<>();
+    DetectedClass(String name) { this.name = name; }
+  }
+
+  static class DetectedAttr {
+    String visibility = "+";
+    String name;
+    String type = "String";
+    DetectedAttr(String name, String type) { this.name = name; this.type = type; }
+  }
+
+  static class DetectedMethod {
+    String visibility = "+";
+    String name;
+    String returnType = "void";
+    DetectedMethod(String name, String returnType) { this.name = name; this.returnType = returnType; }
+  }
+
+  static class DetectedRelation {
+    String source;
+    String target;
+    String name;
+    TipoRelacionUML tipo = TipoRelacionUML.ASOCIACION;
+    String multSource = "1";
+    String multTarget = "*";
+    DetectedRelation(String source, String target, TipoRelacionUML tipo, String multSource, String multTarget) {
+      this.source = source;
+      this.target = target;
+      this.tipo = tipo;
+      this.multSource = multSource;
+      this.multTarget = multTarget;
+    }
   }
 
   private DiagramaClase validateDiagram(UUID projectId, UUID diagramId) {

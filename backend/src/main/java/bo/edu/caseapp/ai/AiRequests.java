@@ -15,4 +15,10 @@ public final class AiRequests {
   }
 
   public record ChatRequest(@NotBlank String question) {}
+
+  public record ReconstructImageRequest(
+      @NotBlank String imageBase64,
+      String filename,
+      String promptHint
+  ) {}
 }

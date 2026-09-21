@@ -29,21 +29,91 @@ export function AiAssistantModal({
   const [messages, setMessages] = useState<MessageItem[]>([
     {
       sender: 'ai',
-      text: '¡Hola! Soy tu asistente de modelado UML e ingeniería de software. Puedes pedirme crear clases, agregar atributos, conectar relaciones por voz o texto, o resolver dudas conceptuales.'
+      text: '¡Hola! Soy tu asistente de modelado UML e ingeniería de software. Puedes pedirme crear clases, agregar atributos, conectar relaciones por voz o texto, reconstruir modelos desde imágenes (CU11) o resolver dudas conceptuales (CU12).'
     }
   ])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [isListening, setIsListening] = useState(false)
-  const [mode, setMode] = useState<'command' | 'chat'>('command')
+  const [mode, setMode] = useState<'command' | 'image' | 'chat'>('command')
+
+  // Estado para CU11: Reconstrucción desde imagen
+  const [imageFile, setImageFile] = useState<File | null>(null)
+  const [imagePreview, setImagePreview] = useState<string | null>(null)
+  const [imagePromptHint, setImagePromptHint] = useState('')
+  const [reconstructResult, setReconstructResult] = useState<{
+    success: boolean
+    message: string
+    classes: number
+    relations: number
+  } | null>(null)
 
   const chatEndRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  // Reconocimiento de voz mediante Web Speech API
+  // Manejo de archivo de imagen para CU11
+  function handleImageSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    setImageFile(file)
+    setReconstructResult(null)
+
+    const reader = new FileReader()
+    reader.onload = () => {
+      setImagePreview(reader.result as string)
+    }
+    reader.readAsDataURL(file)
+  }
+
+  // Ejecución de CU11: Reconstruir modelo UML desde imagen
+  async function handleReconstructImage() {
+    if (!imagePreview || !imageFile || loading) return
+    setLoading(true)
+    setReconstructResult(null)
+
+    try {
+      const res = await fetch(`/api/projects/${projectId}/diagrams/${diagramId}/ai/reconstruct-image`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          imageBase64: imagePreview,
+          filename: imageFile.name,
+          promptHint: imagePromptHint.trim()
+        })
+      })
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.message || 'Error al reconstruir el diagrama desde la imagen.')
+      }
+
+      const data = await res.json()
+      setReconstructResult({
+        success: data.success,
+        message: data.message,
+        classes: data.classesDetected,
+        relations: data.relationsDetected
+      })
+
+      if (data.updatedDiagram) {
+        onDiagramUpdated(data.updatedDiagram)
+      }
+    } catch (err) {
+      onError(err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Reconocimiento de voz mediante Web Speech API (CU10 / CU12)
   function toggleListening() {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
@@ -124,7 +194,7 @@ export function AiAssistantModal({
           onDiagramUpdated(data.updatedDiagram)
         }
       } else {
-        // Chat conceptual / asesoría
+        // Chat conceptual / asesoría (CU12)
         const res = await fetch(`/api/projects/${projectId}/diagrams/${diagramId}/ai/chat`, {
           method: 'POST',
           headers: {
@@ -171,12 +241,12 @@ export function AiAssistantModal({
 
   return (
     <div className="uml-modal-backdrop">
-      <div className="uml-modal ai-modal" style={{ maxWidth: '680px', height: '620px', display: 'flex', flexDirection: 'column' }}>
+      <div className="uml-modal ai-modal" style={{ maxWidth: '720px', height: '640px', display: 'flex', flexDirection: 'column' }}>
         <div className="uml-modal-header" style={{ paddingBottom: '0.75rem', borderBottom: '1px solid #e2e8f0' }}>
           <div>
-            <h3>🤖 Asistente de IA Local & Comandos de Voz</h3>
+            <h3>🤖 Asistente de IA (CU10, CU11, CU12)</h3>
             <span style={{ fontSize: '0.8rem', color: '#64748b' }}>
-              Modela mediante lenguaje natural o consulta conceptos de ingeniería
+              Comandos por texto y voz, reconstrucción desde imagen y asesoría conceptual UML
             </span>
           </div>
           <button type="button" className="close-btn" onClick={onClose}>
@@ -191,120 +261,244 @@ export function AiAssistantModal({
             className={`btn-sm ${mode === 'command' ? 'btn-primary' : 'btn-secondary'}`}
             onClick={() => setMode('command')}
           >
-            ⚡ Comandos al Modelo (Acciones directas)
+            ⚡ Comandos (CU10)
+          </button>
+          <button
+            type="button"
+            className={`btn-sm ${mode === 'image' ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={() => setMode('image')}
+          >
+            📷 Reconstruir desde Imagen (CU11)
           </button>
           <button
             type="button"
             className={`btn-sm ${mode === 'chat' ? 'btn-primary' : 'btn-secondary'}`}
             onClick={() => setMode('chat')}
           >
-            💡 Asesoría y Conceptos UML
+            💡 Asesoría Conceptual (CU12)
           </button>
         </div>
 
-        {/* Historial de conversación */}
-        <div className="ai-chat-history" style={{ flex: 1, overflowY: 'auto', padding: '1rem 0', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-          {messages.map((m, idx) => (
+        {/* Panel para CU11: Reconstrucción desde Imagen */}
+        {mode === 'image' ? (
+          <div style={{ flex: 1, overflowY: 'auto', padding: '1rem 0', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.85rem', fontSize: '0.85rem', color: '#334155' }}>
+              <strong>Caso de Uso CU11:</strong> Sube o arrastra una foto o captura de un diagrama de clases UML (PNG, JPG, SVG). El motor de IA detectará las clases, atributos, métodos y asociaciones, reconstruyéndolos como nodos interactivos y editables en tu lienzo.
+            </div>
+
+            {/* Zona de carga */}
             <div
-              key={idx}
+              onClick={() => fileInputRef.current?.click()}
               style={{
-                alignSelf: m.sender === 'user' ? 'flex-end' : 'flex-start',
-                maxWidth: '85%',
-                background: m.sender === 'user' ? '#2563eb' : '#f1f5f9',
-                color: m.sender === 'user' ? '#ffffff' : '#0f172a',
-                padding: '0.75rem 1rem',
+                border: '2px dashed #94a3b8',
                 borderRadius: '12px',
-                fontSize: '0.9rem',
-                lineHeight: '1.4',
-                boxShadow: '0 1px 2px rgba(0,0,0,0.05)'
+                padding: '1.5rem',
+                textAlign: 'center',
+                cursor: 'pointer',
+                background: imagePreview ? '#f8fafc' : '#ffffff',
+                transition: 'border 0.2s'
               }}
             >
-              {m.actionType && (
-                <div style={{ fontSize: '0.75rem', fontWeight: 'bold', marginBottom: '0.25rem', color: m.success ? '#15803d' : '#b91c1c' }}>
-                  {m.success ? '✓ ' + m.actionType : '⚠ ' + m.actionType}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleImageSelect}
+                style={{ display: 'none' }}
+              />
+
+              {imagePreview ? (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
+                  <img
+                    src={imagePreview}
+                    alt="Diagrama subido"
+                    style={{ maxHeight: '180px', maxWidth: '100%', borderRadius: '8px', objectFit: 'contain', border: '1px solid #cbd5e1' }}
+                  />
+                  <span style={{ fontSize: '0.8rem', color: '#475569', fontWeight: 'bold' }}>
+                    Archivo: {imageFile?.name} ({(imageFile ? imageFile.size / 1024 : 0).toFixed(1)} KB) — Clic para cambiar
+                  </span>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem', padding: '1rem 0' }}>
+                  <span style={{ fontSize: '2.5rem' }}>🖼️</span>
+                  <span style={{ fontWeight: 'bold', color: '#1e293b' }}>
+                    Haz clic aquí o arrastra una imagen de un diagrama UML
+                  </span>
+                  <span style={{ fontSize: '0.8rem', color: '#64748b' }}>
+                    Soporta formatos PNG, JPG, JPEG, WEBP y SVG
+                  </span>
                 </div>
               )}
-              <div>{m.text}</div>
-              {m.suggestion && (
+            </div>
+
+            {/* Campo opcional de sugerencia / pista de dominio */}
+            <div>
+              <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 'bold', color: '#475569', marginBottom: '0.3rem' }}>
+                Pista de dominio / contexto (opcional):
+              </label>
+              <input
+                type="text"
+                value={imagePromptHint}
+                onChange={(e) => setImagePromptHint(e.target.value)}
+                placeholder="Ej. 'Sistema Hospitalario', 'Facturación y Ventas', o 'Estudiante, Profesor, Asignatura'"
+                style={{ width: '100%', padding: '0.55rem 0.8rem', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '0.85rem' }}
+              />
+            </div>
+
+            {/* Mensaje de resultado */}
+            {reconstructResult && (
+              <div
+                style={{
+                  padding: '0.85rem 1rem',
+                  borderRadius: '8px',
+                  background: reconstructResult.success ? '#ecfdf5' : '#fef2f2',
+                  border: `1px solid ${reconstructResult.success ? '#10b981' : '#ef4444'}`,
+                  color: reconstructResult.success ? '#065f46' : '#991b1b',
+                  fontSize: '0.85rem'
+                }}
+              >
+                <strong>{reconstructResult.success ? '✅ ¡Reconstrucción exitosa!' : '⚠️ Aviso:'}</strong>{' '}
+                {reconstructResult.message}
+                {reconstructResult.classes > 0 && (
+                  <div style={{ marginTop: '0.3rem', fontSize: '0.8rem' }}>
+                    Se insertaron <strong>{reconstructResult.classes} clases</strong> y <strong>{reconstructResult.relations} relaciones</strong> directamente en el lienzo visual.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Botón de acción */}
+            <div style={{ marginTop: 'auto', display: 'flex', justifyContent: 'flex-end', gap: '0.75rem' }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => {
+                  setImageFile(null)
+                  setImagePreview(null)
+                  setReconstructResult(null)
+                }}
+                disabled={loading || !imageFile}
+              >
+                Limpiar
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={handleReconstructImage}
+                disabled={loading || !imageFile}
+                style={{ minWidth: '180px' }}
+              >
+                {loading ? 'Reconstruyendo modelo...' : '🚀 Reconstruir en el Lienzo'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* Historial de conversación para CU10 y CU12 */}
+            <div className="ai-chat-history" style={{ flex: 1, overflowY: 'auto', padding: '1rem 0', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              {messages.map((m, idx) => (
                 <div
-                  onClick={() => handleSend(m.suggestion)}
-                  style={{ marginTop: '0.5rem', fontSize: '0.78rem', color: '#4338ca', cursor: 'pointer', textDecoration: 'underline' }}
+                  key={idx}
+                  style={{
+                    alignSelf: m.sender === 'user' ? 'flex-end' : 'flex-start',
+                    maxWidth: '85%',
+                    background: m.sender === 'user' ? '#2563eb' : '#f1f5f9',
+                    color: m.sender === 'user' ? '#ffffff' : '#0f172a',
+                    padding: '0.75rem 1rem',
+                    borderRadius: '12px',
+                    fontSize: '0.9rem',
+                    lineHeight: '1.4',
+                    boxShadow: '0 1px 2px rgba(0,0,0,0.05)'
+                  }}
                 >
-                  💡 Sugerencia: {m.suggestion}
+                  {m.actionType && (
+                    <div style={{ fontSize: '0.75rem', fontWeight: 'bold', marginBottom: '0.25rem', color: m.success ? '#15803d' : '#b91c1c' }}>
+                      {m.success ? '✓ ' + m.actionType : '⚠ ' + m.actionType}
+                    </div>
+                  )}
+                  <div>{m.text}</div>
+                  {m.suggestion && (
+                    <div
+                      onClick={() => handleSend(m.suggestion)}
+                      style={{ marginTop: '0.5rem', fontSize: '0.78rem', color: '#4338ca', cursor: 'pointer', textDecoration: 'underline' }}
+                    >
+                      💡 Sugerencia: {m.suggestion}
+                    </div>
+                  )}
+                </div>
+              ))}
+              {loading && (
+                <div style={{ alignSelf: 'flex-start', color: '#64748b', fontSize: '0.85rem', fontStyle: 'italic' }}>
+                  El asistente está procesando tu solicitud...
                 </div>
               )}
+              <div ref={chatEndRef} />
             </div>
-          ))}
-          {loading && (
-            <div style={{ alignSelf: 'flex-start', color: '#64748b', fontSize: '0.85rem', fontStyle: 'italic' }}>
-              El asistente está procesando tu comando...
-            </div>
-          )}
-          <div ref={chatEndRef} />
-        </div>
 
-        {/* Sugerencias rápidas */}
-        <div style={{ display: 'flex', gap: '0.4rem', overflowX: 'auto', paddingBottom: '0.5rem' }}>
-          {quickPrompts.slice(0, 3).map((prompt, i) => (
-            <button
-              key={i}
-              type="button"
-              className="btn-sm"
-              style={{ fontSize: '0.75rem', whiteSpace: 'nowrap', background: '#f8fafc', borderColor: '#cbd5e1' }}
-              onClick={() => handleSend(prompt)}
+            {/* Sugerencias rápidas */}
+            <div style={{ display: 'flex', gap: '0.4rem', overflowX: 'auto', paddingBottom: '0.5rem' }}>
+              {quickPrompts.slice(0, 3).map((prompt, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  className="btn-sm"
+                  style={{ fontSize: '0.75rem', whiteSpace: 'nowrap', background: '#f8fafc', borderColor: '#cbd5e1' }}
+                  onClick={() => handleSend(prompt)}
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
+
+            {/* Input con micrófono y envío */}
+            <form
+              onSubmit={(e) => {
+                e.preventDefault()
+                handleSend()
+              }}
+              style={{ display: 'flex', gap: '0.5rem', paddingTop: '0.75rem', borderTop: '1px solid #e2e8f0' }}
             >
-              {prompt}
-            </button>
-          ))}
-        </div>
+              <button
+                type="button"
+                onClick={toggleListening}
+                title={isListening ? 'Escuchando... clic para detener' : 'Hablar por micrófono'}
+                style={{
+                  padding: '0.6rem 0.9rem',
+                  borderRadius: '8px',
+                  border: '1px solid #cbd5e1',
+                  background: isListening ? '#ef4444' : '#f1f5f9',
+                  color: isListening ? '#ffffff' : '#334155',
+                  cursor: 'pointer',
+                  fontWeight: 'bold',
+                  transition: 'background 0.2s'
+                }}
+              >
+                {isListening ? '🔴 Detener' : '🎙️ Voz'}
+              </button>
 
-        {/* Input con micrófono y envío */}
-        <form
-          onSubmit={(e) => {
-            e.preventDefault()
-            handleSend()
-          }}
-          style={{ display: 'flex', gap: '0.5rem', paddingTop: '0.75rem', borderTop: '1px solid #e2e8f0' }}
-        >
-          <button
-            type="button"
-            onClick={toggleListening}
-            title={isListening ? 'Escuchando... clic para detener' : 'Hablar por micrófono'}
-            style={{
-              padding: '0.6rem 0.9rem',
-              borderRadius: '8px',
-              border: '1px solid #cbd5e1',
-              background: isListening ? '#ef4444' : '#f1f5f9',
-              color: isListening ? '#ffffff' : '#334155',
-              cursor: 'pointer',
-              fontWeight: 'bold',
-              transition: 'background 0.2s'
-            }}
-          >
-            {isListening ? '🔴 Detener' : '🎙️ Voz'}
-          </button>
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder={
+                  mode === 'command'
+                    ? 'Ej. Crear clase Producto con nombre:String, precio:Double'
+                    : 'Haz una pregunta sobre modelado UML o arquitectura (CU12)...'
+                }
+                style={{ flex: 1, padding: '0.6rem 0.9rem', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '0.9rem' }}
+              />
 
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={
-              mode === 'command'
-                ? 'Ej. Crear clase Producto con nombre:String, precio:Double'
-                : 'Haz una pregunta sobre modelado UML o arquitectura...'
-            }
-            style={{ flex: 1, padding: '0.6rem 0.9rem', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '0.9rem' }}
-          />
-
-          <button
-            type="submit"
-            disabled={loading || !input.trim()}
-            className="btn btn-primary"
-            style={{ padding: '0.6rem 1.2rem' }}
-          >
-            Enviar
-          </button>
-        </form>
+              <button
+                type="submit"
+                disabled={loading || !input.trim()}
+                className="btn btn-primary"
+                style={{ padding: '0.6rem 1.2rem' }}
+              >
+                Enviar
+              </button>
+            </form>
+          </>
+        )}
       </div>
     </div>
   )
