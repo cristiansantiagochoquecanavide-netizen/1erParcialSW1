@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react'
+import { UmlCanvas } from './uml/UmlCanvas'
 
 type Role = 'PROPIETARIO' | 'EDITOR' | 'LECTOR'
 type Project = { id: string; name: string; description: string | null; role: Role; createdAt: string }
@@ -36,11 +37,62 @@ function AuthScreen({ registering, setRegistering, onAuth, onError, message }: {
 
 function Workspace({ project, auth, onBack, onError }: { project: Project; auth: Auth; onBack: () => void; onError: (e: unknown) => void }) {
   const [members, setMembers] = useState<Member[]>([])
+  const [showMembers, setShowMembers] = useState(false)
   const loadMembers = () => api<Member[]>(`/api/projects/${project.id}/members`, auth.token).then(setMembers).catch(onError)
   useEffect(() => { loadMembers() }, []) // eslint-disable-line react-hooks/exhaustive-deps
   async function add(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const f = new FormData(event.currentTarget); try { await api(`/api/projects/${project.id}/members`, auth.token, { method: 'POST', body: JSON.stringify({ email: f.get('email'), role: f.get('role') }) }); event.currentTarget.reset(); loadMembers() } catch (e) { onError(e) } }
   async function role(member: Member, value: string) { try { await api(`/api/projects/${project.id}/members/${member.id}`, auth.token, { method: 'PUT', body: JSON.stringify({ role: value }) }); loadMembers() } catch (e) { onError(e) } }
   async function remove(member: Member) { if (!confirm(`¿Quitar a ${member.name}?`)) return; try { await api(`/api/projects/${project.id}/members/${member.id}`, auth.token, { method: 'DELETE' }); loadMembers() } catch (e) { onError(e) } }
-  return <main className="app"><header><div><h1>{project.name}</h1><p>Workspace de modelado</p></div><button className="secondary" onClick={onBack}>Volver a proyectos</button></header><section className="workspace"><h2>Editor UML</h2><p>Este espacio queda reservado para el futuro editor de diagramas de clases.</p></section>
-    <section className="card"><h2>Colaboradores</h2>{project.role === 'PROPIETARIO' && <form className="inline" onSubmit={add}><input name="email" type="email" required placeholder="Correo del colaborador" /><select name="role" defaultValue="EDITOR"><option value="EDITOR">EDITOR</option><option value="LECTOR">LECTOR</option></select><button>Agregar</button></form>}<div className="members">{members.map(m => <div key={m.id} className="member"><span><strong>{m.name}</strong> · {m.email}</span>{project.role === 'PROPIETARIO' && m.role !== 'PROPIETARIO' ? <span><select value={m.role} onChange={e => role(m, e.target.value)}><option value="EDITOR">EDITOR</option><option value="LECTOR">LECTOR</option></select><button className="danger" onClick={() => remove(m)}>Quitar</button></span> : <span className="role">{m.role}</span>}</div>)}</div></section></main>
+  return (
+    <main className="app workspace-page">
+      <header>
+        <div>
+          <h1>{project.name}</h1>
+          <p>Workspace de modelado UML · Tu rol: <strong className="role">{project.role}</strong></p>
+        </div>
+        <div className="actions">
+          <button className="secondary" onClick={() => setShowMembers(!showMembers)}>
+            {showMembers ? 'Ocultar Colaboradores' : `Colaboradores (${members.length})`}
+          </button>
+          <button className="secondary" onClick={onBack}>Volver a proyectos</button>
+        </div>
+      </header>
+
+      {showMembers && (
+        <section className="card collaborators-panel">
+          <h2>Colaboradores del proyecto</h2>
+          {project.role === 'PROPIETARIO' && (
+            <form className="inline" onSubmit={add}>
+              <input name="email" type="email" required placeholder="Correo del colaborador" />
+              <select name="role" defaultValue="EDITOR">
+                <option value="EDITOR">EDITOR</option>
+                <option value="LECTOR">LECTOR</option>
+              </select>
+              <button>Agregar</button>
+            </form>
+          )}
+          <div className="members">
+            {members.map(m => (
+              <div key={m.id} className="member">
+                <span><strong>{m.name}</strong> · {m.email}</span>
+                {project.role === 'PROPIETARIO' && m.role !== 'PROPIETARIO' ? (
+                  <span>
+                    <select value={m.role} onChange={e => role(m, e.target.value)}>
+                      <option value="EDITOR">EDITOR</option>
+                      <option value="LECTOR">LECTOR</option>
+                    </select>
+                    <button className="danger" onClick={() => remove(m)}>Quitar</button>
+                  </span>
+                ) : (
+                  <span className="role">{m.role}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      <UmlCanvas project={project} auth={auth} onError={onError} />
+    </main>
+  )
 }
