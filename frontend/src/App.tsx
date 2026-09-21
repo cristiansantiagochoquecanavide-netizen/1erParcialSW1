@@ -22,7 +22,22 @@ export default function App() {
   if (!auth) return <AuthScreen registering={registering} setRegistering={setRegistering} onAuth={value => { localStorage.setItem('case.auth', JSON.stringify(value)); setAuth(value) }} onError={error} message={message} />
   if (selected) return <Workspace project={selected} auth={auth} onBack={() => { setSelected(null); load() }} onError={error} />
   const token = auth.token
-  async function create(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api('/api/projects', token, { method: 'POST', body: JSON.stringify({ name: form.get('name'), description: form.get('description') }) }); event.currentTarget.reset(); load() } catch (e) { error(e) } }
+  async function create(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const formEl = event.currentTarget
+    const form = new FormData(formEl)
+    try {
+      setMessage(null)
+      await api('/api/projects', token, {
+        method: 'POST',
+        body: JSON.stringify({ name: form.get('name'), description: form.get('description') })
+      })
+      formEl.reset()
+      load()
+    } catch (e) {
+      error(e)
+    }
+  }
   async function rename(p: Project) { const name = prompt('Nombre del proyecto:', p.name); if (!name) return; try { await api(`/api/projects/${p.id}`, token, { method: 'PUT', body: JSON.stringify({ name, description: p.description }) }); load() } catch (e) { error(e) } }
   async function remove(p: Project) { if (!confirm(`¿Eliminar “${p.name}”?`)) return; try { await api(`/api/projects/${p.id}`, token, { method: 'DELETE' }); load() } catch (e) { error(e) } }
   return <main className="app"><header><div><h1>Proyecto CASE</h1><p>{auth.name} · {auth.email}</p></div><button className="secondary" onClick={() => { localStorage.removeItem('case.auth'); setAuth(null) }}>Salir</button></header>{message && <p className="error">{message}</p>}
@@ -40,7 +55,7 @@ function Workspace({ project, auth, onBack, onError }: { project: Project; auth:
   const [showMembers, setShowMembers] = useState(false)
   const loadMembers = () => api<Member[]>(`/api/projects/${project.id}/members`, auth.token).then(setMembers).catch(onError)
   useEffect(() => { loadMembers() }, []) // eslint-disable-line react-hooks/exhaustive-deps
-  async function add(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const f = new FormData(event.currentTarget); try { await api(`/api/projects/${project.id}/members`, auth.token, { method: 'POST', body: JSON.stringify({ email: f.get('email'), role: f.get('role') }) }); event.currentTarget.reset(); loadMembers() } catch (e) { onError(e) } }
+  async function add(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const formEl = event.currentTarget; const f = new FormData(formEl); try { await api(`/api/projects/${project.id}/members`, auth.token, { method: 'POST', body: JSON.stringify({ email: f.get('email'), role: f.get('role') }) }); formEl.reset(); loadMembers() } catch (e) { onError(e) } }
   async function role(member: Member, value: string) { try { await api(`/api/projects/${project.id}/members/${member.id}`, auth.token, { method: 'PUT', body: JSON.stringify({ role: value }) }); loadMembers() } catch (e) { onError(e) } }
   async function remove(member: Member) { if (!confirm(`¿Quitar a ${member.name}?`)) return; try { await api(`/api/projects/${project.id}/members/${member.id}`, auth.token, { method: 'DELETE' }); loadMembers() } catch (e) { onError(e) } }
   return (
