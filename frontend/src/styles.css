@@ -224,6 +224,27 @@ article p {
   color: #b91c1c;
 }
 
+.status-pill.offline {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fde68a;
+  font-weight: 600;
+}
+
+.status-pill.online {
+  background: #dcfce7;
+  color: #15803d;
+  border: 1px solid #bbf7d0;
+  font-weight: 600;
+}
+
+.status-pill.syncing {
+  background: #e0f2fe;
+  color: #0369a1;
+  border: 1px solid #bae6fd;
+  font-weight: 600;
+}
+
 .readonly-badge {
   font-size: 0.75rem;
   padding: 0.2rem 0.6rem;
@@ -231,6 +252,28 @@ article p {
   color: #92400e;
   border-radius: 12px;
   font-weight: 600;
+}
+
+.collab-pill {
+  font-size: 0.72rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 12px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.collab-pill.connected {
+  background: #dcfce7;
+  color: #15803d;
+  border: 1px solid #bbf7d0;
+}
+
+.collab-pill.syncing {
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #e2e8f0;
 }
 
 .uml-toolbar-actions {
@@ -269,8 +312,49 @@ article p {
 }
 
 .uml-node-card.selected {
-  border-color: #2563eb;
-  box-shadow: 0 0 0 2px #3b82f670, 0 6px 16px #0f172a25;
+  border-color: #2563eb !important;
+  box-shadow: 0 0 0 2.5px #3b82f6, 0 8px 20px rgba(37, 99, 235, 0.25) !important;
+  position: relative;
+}
+
+.uml-node-card.selected::after {
+  content: '✓';
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #ffffff;
+  background: #2563eb;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+.react-flow__selection {
+  background: rgba(37, 99, 235, 0.12) !important;
+  border: 1.5px dashed #2563eb !important;
+  border-radius: 4px;
+}
+
+.selection-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  padding: 0.2rem 0.5rem;
+  border-radius: 6px;
+}
+
+.selection-count-badge {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #1e40af;
 }
 
 .uml-node-card.interfaz .uml-node-header {
@@ -309,6 +393,18 @@ article p {
 
 .uml-node-title.italic {
   font-style: italic;
+}
+
+.uml-node-description {
+  font-size: 10px;
+  color: #475569;
+  font-style: italic;
+  margin-top: 3px;
+  line-height: 1.25;
+  word-break: break-word;
+  background: #f8fafc80;
+  padding: 2px 4px;
+  border-radius: 3px;
 }
 
 .uml-node-actions {

@@ -1,15 +1,34 @@
 import { useState } from 'react'
-import { RelationalSchema } from './types'
+import { DiagramFullView, RelationalSchema } from './types'
 
 type Props = {
   schema: RelationalSchema
   projectName: string
+  projectId?: string
+  diagramId?: string
+  token?: string
+  isReadOnly?: boolean
   onClose: () => void
+  onDiagramUpdated?: (fullView: DiagramFullView) => void
+  onError?: (err: unknown) => void
 }
 
-export function RelationalModal({ schema, projectName, onClose }: Props) {
-  const [activeTab, setActiveTab] = useState<'tables' | 'sql'>('tables')
+export function RelationalModal({
+  schema,
+  projectName,
+  projectId,
+  diagramId,
+  token,
+  isReadOnly,
+  onClose,
+  onDiagramUpdated,
+  onError
+}: Props) {
+  const [activeTab, setActiveTab] = useState<'tables' | 'sql' | 'import'>('tables')
   const [copied, setCopied] = useState(false)
+  const [importSqlText, setImportSqlText] = useState('')
+  const [importing, setImporting] = useState(false)
+  const [importSuccess, setImportSuccess] = useState<string | null>(null)
 
   function handleCopySql() {
     navigator.clipboard.writeText(schema.sqlDdl)
@@ -28,14 +47,48 @@ export function RelationalModal({ schema, projectName, onClose }: Props) {
     document.body.removeChild(link)
   }
 
+  async function handleImportSqlSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!projectId || !diagramId || !token || !importSqlText.trim()) return
+
+    setImporting(true)
+    setImportSuccess(null)
+    try {
+      const res = await fetch(`/api/projects/${projectId}/diagrams/${diagramId}/import/sql`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ sql: importSqlText })
+      })
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.message || 'Error al importar script SQL.')
+      }
+
+      const updatedFullView: DiagramFullView = await res.json()
+      setImportSuccess('¡Tablas y relaciones SQL importadas exitosamente al modelo UML!')
+      if (onDiagramUpdated) {
+        onDiagramUpdated(updatedFullView)
+      }
+    } catch (err) {
+      if (onError) onError(err)
+      else alert(String(err))
+    } finally {
+      setImporting(false)
+    }
+  }
+
   return (
     <div className="uml-modal-backdrop">
       <div className="uml-modal-card large">
         <header className="uml-modal-header">
           <div>
-            <h3>Modelo Relacional y Script DDL (CU06)</h3>
+            <h3>Modelo Relacional y Script DDL (CU06 / CU11)</h3>
             <p className="modal-subtitle">
-              Transformación automática del modelo conceptual UML a base de datos PostgreSQL.
+              Transformación bidireccional entre modelo conceptual UML y tablas SQL PostgreSQL.
             </p>
           </div>
           <button type="button" className="close-btn" onClick={onClose}>✕</button>
@@ -56,6 +109,13 @@ export function RelationalModal({ schema, projectName, onClose }: Props) {
             onClick={() => setActiveTab('sql')}
           >
             💾 Script SQL DDL (PostgreSQL)
+          </button>
+          <button
+            type="button"
+            className={`tab-btn ${activeTab === 'import' ? 'active' : ''}`}
+            onClick={() => setActiveTab('import')}
+          >
+            📥 Importar SQL a UML (CU11)
           </button>
         </div>
 
@@ -149,6 +209,42 @@ export function RelationalModal({ schema, projectName, onClose }: Props) {
             <pre className="sql-code-block">
               <code>{schema.sqlDdl}</code>
             </pre>
+          </div>
+        )}
+
+        {/* Contenido Pestaña 3: Importar SQL DDL a Clases UML (CU11) */}
+        {activeTab === 'import' && (
+          <div className="sql-import-view" style={{ padding: '1rem 0' }}>
+            <p style={{ fontSize: '0.9rem', color: '#475569', marginBottom: '0.75rem' }}>
+              Ingresa una o varias sentencias <code>CREATE TABLE</code> en SQL (PostgreSQL, MySQL o estándar).
+              El sistema reconocerá automáticamente el nombre de la tabla como clase UML, sus campos como atributos con sus tipos correspondientes, claves primarias y claves foráneas convertidas en relaciones con cardinalidad (CU11).
+            </p>
+
+            {importSuccess && (
+              <div style={{ background: '#dcfce7', color: '#15803d', padding: '0.75rem 1rem', borderRadius: '6px', marginBottom: '0.75rem', fontWeight: 600 }}>
+                {importSuccess}
+              </div>
+            )}
+
+            <form onSubmit={handleImportSqlSubmit}>
+              <textarea
+                rows={10}
+                value={importSqlText}
+                onChange={(e) => setImportSqlText(e.target.value)}
+                placeholder={`CREATE TABLE producto (\n  id SERIAL PRIMARY KEY,\n  nombre VARCHAR(100) NOT NULL,\n  precio NUMERIC(10,2) NOT NULL,\n  stock INT DEFAULT 0\n);`}
+                style={{ width: '100%', fontFamily: 'monospace', fontSize: '0.85rem', padding: '0.75rem', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+                disabled={importing || isReadOnly}
+              />
+              <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
+                <button
+                  type="submit"
+                  disabled={importing || !importSqlText.trim() || isReadOnly}
+                  style={{ background: '#2563eb', color: 'white', padding: '0.5rem 1rem', borderRadius: '6px', fontWeight: 600 }}
+                >
+                  {importing ? 'Procesando SQL...' : '📥 Reconocer e Importar a Modelo UML'}
+                </button>
+              </div>
+            </form>
           </div>
         )}
 

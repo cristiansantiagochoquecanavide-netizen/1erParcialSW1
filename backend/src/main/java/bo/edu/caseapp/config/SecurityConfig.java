@@ -17,7 +17,7 @@ public class SecurityConfig {
   @Bean AuthenticationManager authenticationManager(AuthenticationConfiguration config) throws Exception { return config.getAuthenticationManager(); }
   @Bean SecurityFilterChain securityFilterChain(HttpSecurity http, JwtAuthenticationFilter jwtFilter) throws Exception {
     return http.csrf(csrf -> csrf.disable()).cors(cors -> { }).sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-        .authorizeHttpRequests(auth -> auth.requestMatchers("/api/auth/**", "/api/health").permitAll().anyRequest().authenticated())
+        .authorizeHttpRequests(auth -> auth.requestMatchers("/api/auth/**", "/api/health", "/ws/**").permitAll().anyRequest().authenticated())
         .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class).build();
   }
 }

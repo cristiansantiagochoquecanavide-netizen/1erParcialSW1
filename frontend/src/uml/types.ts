@@ -3,7 +3,31 @@ export type Role = 'PROPIETARIO' | 'EDITOR' | 'LECTOR'
 export type TipoElementoUML = 'CLASE' | 'INTERFAZ' | 'CLASE_ABSTRACTA' | 'ENUMERACION'
 export type TipoRelacionUML = 'ASOCIACION' | 'HERENCIA' | 'AGREGACION' | 'COMPOSICION' | 'DEPENDENCIA'
 
-export type UmlVisibility = '+' | '-' | '#'
+export type UmlVisibility = '+' | '-' | '#' | '~'
+
+export const UML_DATA_TYPES = [
+  'String',
+  'Integer',
+  'Long',
+  'Float',
+  'Double',
+  'Decimal',
+  'Boolean',
+  'Date',
+  'DateTime',
+  'Time',
+  'Char',
+  'Text',
+  'UUID',
+  'JSON',
+  'List',
+  'Set',
+  'Array',
+  'Object',
+  'Enum'
+] as const
+
+export type UmlDataType = (typeof UML_DATA_TYPES)[number]
 
 export type UmlAttribute = {
   id: string
@@ -21,6 +45,8 @@ export type UmlMethod = {
 }
 
 export type UmlProperties = {
+  description?: string
+  stereotype?: string
   attributes: UmlAttribute[]
   methods: UmlMethod[]
 }
@@ -106,14 +132,16 @@ export type RelationalSchema = {
 }
 
 export function parseUmlProperties(json?: string | null): UmlProperties {
-  if (!json) return { attributes: [], methods: [] }
+  if (!json) return { description: '', stereotype: '', attributes: [], methods: [] }
   try {
     const parsed = JSON.parse(json)
     return {
+      description: typeof parsed.description === 'string' ? parsed.description : '',
+      stereotype: typeof parsed.stereotype === 'string' ? parsed.stereotype : '',
       attributes: Array.isArray(parsed.attributes) ? parsed.attributes : [],
       methods: Array.isArray(parsed.methods) ? parsed.methods : []
     }
   } catch {
-    return { attributes: [], methods: [] }
+    return { description: '', stereotype: '', attributes: [], methods: [] }
   }
 }

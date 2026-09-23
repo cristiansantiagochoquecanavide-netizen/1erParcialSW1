@@ -15,10 +15,12 @@ export type UmlNodeData = {
 export type UmlNodeType = Node<UmlNodeData, 'umlClass'>
 
 function UmlClassNodeComponent({ data, selected }: NodeProps<UmlNodeType>) {
-  const { attributes, methods } = parseUmlProperties(data.propertiesJson)
+  const { attributes, methods, description, stereotype: customStereotype } = parseUmlProperties(data.propertiesJson)
 
   const stereotype =
-    data.elementType === 'INTERFAZ'
+    customStereotype && customStereotype.trim()
+      ? (customStereotype.startsWith('«') ? customStereotype : `«${customStereotype}»`)
+      : data.elementType === 'INTERFAZ'
       ? '«interface»'
       : data.elementType === 'CLASE_ABSTRACTA'
       ? '«abstract»'
@@ -47,6 +49,11 @@ function UmlClassNodeComponent({ data, selected }: NodeProps<UmlNodeType>) {
       <div className="uml-node-header">
         {stereotype && <div className="uml-stereotype">{stereotype}</div>}
         <div className={`uml-node-title ${isAbstract ? 'italic' : ''}`}>{data.name}</div>
+        {description && description.trim() && (
+          <div className="uml-node-description" title={description}>
+            {description}
+          </div>
+        )}
 
         {!data.readOnly && (
           <div className="uml-node-actions nodrag">
@@ -95,12 +102,15 @@ function UmlClassNodeComponent({ data, selected }: NodeProps<UmlNodeType>) {
         {methods.length === 0 ? (
           <div className="uml-empty-line"> </div>
         ) : (
-          methods.map((method) => (
-            <div key={method.id} className="uml-method-item">
-              <span className="vis">{method.visibility}</span> {method.name}({method.parameters}):{' '}
-              <span className="type">{method.returnType}</span>
-            </div>
-          ))
+          methods.map((method) => {
+            const cleanName = (method.name || '').replace(/\(\s*\)$/, '')
+            return (
+              <div key={method.id} className="uml-method-item">
+                <span className="vis">{method.visibility}</span> {cleanName}({method.parameters || ''}):{' '}
+                <span className="type">{method.returnType}</span>
+              </div>
+            )
+          })
         )}
       </div>
     </div>

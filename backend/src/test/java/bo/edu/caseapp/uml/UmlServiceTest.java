@@ -61,7 +61,9 @@ class UmlServiceTest {
     diagramId = UUID.randomUUID();
     User user = new User("Ana", "ana@example.com", "hash");
     project = new Project(user, "Proyecto UML", "Desc");
+    org.springframework.test.util.ReflectionTestUtils.setField(project, "id", projectId);
     diagram = new DiagramaClase(project, "Diagrama 1", "Desc Diagrama");
+    org.springframework.test.util.ReflectionTestUtils.setField(diagram, "id", diagramId);
 
     email = "ana@example.com";
   }
@@ -103,6 +105,30 @@ class UmlServiceTest {
     assertEquals(100.0, detail.posicionX());
     assertEquals(200.0, detail.posicionY());
     assertTrue(detail.propiedadesJson().contains("attributes"));
+  }
+
+  @Test
+  void saveElement_emptyClassWithoutDefaultAttributes() {
+    ProjectMember member = new ProjectMember(project, project.getCreator(), ProjectRole.PROPIETARIO);
+    when(projectService.requireCanEdit(projectId, email)).thenReturn(member);
+    when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
+    when(elements.save(any(ElementoUML.class))).thenAnswer(i -> i.getArgument(0));
+
+    SaveElement request = new SaveElement(
+        null,
+        TipoElementoUML.CLASE,
+        "Producto",
+        150.0,
+        120.0,
+        "{\"description\":\"Clase para gestionar productos del catalogo\",\"attributes\":[],\"methods\":[]}"
+    );
+
+    ElementDetail detail = service.saveElement(projectId, diagramId, email, request);
+
+    assertNotNull(detail);
+    assertEquals("Producto", detail.nombre());
+    assertTrue(detail.propiedadesJson().contains("\"attributes\":[]"));
+    assertTrue(detail.propiedadesJson().contains("Clase para gestionar productos"));
   }
 
   @Test
@@ -166,9 +192,12 @@ class UmlServiceTest {
     when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
 
     ElementoUML cliente = new ElementoUML(diagram, TipoElementoUML.CLASE, "Cliente", 0, 0, "{\"attributes\":[{\"name\":\"nombre\",\"type\":\"String\"}]}");
+    org.springframework.test.util.ReflectionTestUtils.setField(cliente, "id", UUID.randomUUID());
     ElementoUML pedido = new ElementoUML(diagram, TipoElementoUML.CLASE, "Pedido", 0, 0, "{\"attributes\":[{\"name\":\"total\",\"type\":\"Double\"}]}");
+    org.springframework.test.util.ReflectionTestUtils.setField(pedido, "id", UUID.randomUUID());
 
     RelacionUML rel = new RelacionUML(diagram, cliente, pedido, "realiza", TipoRelacionUML.ASOCIACION, "1", "*");
+    org.springframework.test.util.ReflectionTestUtils.setField(rel, "id", UUID.randomUUID());
 
     when(elements.findByDiagramaId(diagramId)).thenReturn(List.of(cliente, pedido));
     when(relations.findByDiagramaId(diagramId)).thenReturn(List.of(rel));
