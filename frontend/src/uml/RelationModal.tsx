@@ -34,6 +34,13 @@ export function RelationModal({
     onSave(type, name.trim() || null, multOrigin.trim() || null, multTarget.trim() || null)
   }
 
+  function handleDeleteClick() {
+    if (!onDelete) return
+    if (confirm(`¿Deseas eliminar la relación entre «${sourceName}» y «${targetName}»?`)) {
+      onDelete()
+    }
+  }
+
   return (
     <div className="uml-modal-backdrop">
       <div className="uml-modal-card small">
@@ -96,7 +103,7 @@ export function RelationModal({
 
           <footer className="uml-modal-footer space-between">
             {onDelete ? (
-              <button type="button" className="danger" onClick={onDelete}>Eliminar Relación</button>
+              <button type="button" className="danger" onClick={handleDeleteClick}>Eliminar Relación</button>
             ) : <span />}
             <div className="actions">
               <button type="button" className="secondary" onClick={onClose}>Cancelar</button>

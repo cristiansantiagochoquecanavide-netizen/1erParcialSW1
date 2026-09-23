@@ -1,5 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { DiagramFullView } from './types'
+import {
+  recognizeDiagramWithOcr,
+  recognizeDiagramWithGemini,
+  RecognizedDiagram
+} from './imageDiagramRecognizer'
 
 type Props = {
   projectId: string
@@ -41,6 +46,10 @@ export function AiAssistantModal({
   const [imageFile, setImageFile] = useState<File | null>(null)
   const [imagePreview, setImagePreview] = useState<string | null>(null)
   const [imagePromptHint, setImagePromptHint] = useState('')
+  const [geminiApiKey, setGeminiApiKey] = useState(() => localStorage.getItem('case_gemini_api_key') || '')
+  const [showApiKeyInput, setShowApiKeyInput] = useState(false)
+  const [analyzingStatus, setAnalyzingStatus] = useState<string | null>(null)
+  const [detectedDiagram, setDetectedDiagram] = useState<RecognizedDiagram | null>(null)
   const [reconstructResult, setReconstructResult] = useState<{
     success: boolean
     message: string
@@ -55,6 +64,45 @@ export function AiAssistantModal({
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  // Guardar clave de Gemini en localStorage
+  function handleSaveGeminiKey(key: string) {
+    const cleanKey = key.trim()
+    setGeminiApiKey(cleanKey)
+    if (cleanKey) {
+      localStorage.setItem('case_gemini_api_key', cleanKey)
+      alert('✓ Clave de Google Gemini guardada con éxito. Se usará visión multimodal.')
+      if (imagePreview) {
+        performImageAnalysis(imagePreview)
+      }
+    } else {
+      localStorage.removeItem('case_gemini_api_key')
+      alert('Clave de Gemini eliminada. Se usará el motor de OCR local.')
+    }
+  }
+
+  // Análisis automático mediante OCR local o Gemini Vision
+  async function performImageAnalysis(base64Data: string) {
+    setAnalyzingStatus('Iniciando análisis...')
+    try {
+      let result: RecognizedDiagram | null = null
+      if (geminiApiKey.trim()) {
+        setAnalyzingStatus('Consultando Google Gemini Vision...')
+        result = await recognizeDiagramWithGemini(base64Data, geminiApiKey.trim())
+      }
+      if (!result) {
+        setAnalyzingStatus('Iniciando motor de OCR local...')
+        result = await recognizeDiagramWithOcr(base64Data, (msg) => setAnalyzingStatus(msg))
+      }
+      setDetectedDiagram(result)
+      setAnalyzingStatus(null)
+      return result
+    } catch (err) {
+      console.warn('Fallo en análisis de imagen:', err)
+      setAnalyzingStatus(null)
+      return null
+    }
+  }
+
   // Manejo de archivo de imagen para CU11
   function handleImageSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -62,10 +110,13 @@ export function AiAssistantModal({
 
     setImageFile(file)
     setReconstructResult(null)
+    setDetectedDiagram(null)
 
     const reader = new FileReader()
     reader.onload = () => {
-      setImagePreview(reader.result as string)
+      const b64 = reader.result as string
+      setImagePreview(b64)
+      performImageAnalysis(b64)
     }
     reader.readAsDataURL(file)
   }
@@ -75,8 +126,11 @@ export function AiAssistantModal({
     if (!imagePreview || !imageFile || loading) return
     setLoading(true)
     setReconstructResult(null)
+    setAnalyzingStatus('Reconstruyendo clases y relaciones en el lienzo...')
 
     try {
+      const diagramToUse = detectedDiagram
+
       const res = await fetch(`/api/projects/${projectId}/diagrams/${diagramId}/ai/reconstruct-image`, {
         method: 'POST',
         headers: {
@@ -86,7 +140,10 @@ export function AiAssistantModal({
         body: JSON.stringify({
           imageBase64: imagePreview,
           filename: imageFile.name,
-          promptHint: imagePromptHint.trim()
+          promptHint: imagePromptHint.trim(),
+          geminiApiKey: geminiApiKey.trim() || undefined,
+          clientDetectedClasses: diagramToUse?.classes || [],
+          clientDetectedRelations: diagramToUse?.relations || []
         })
       })
 
@@ -110,6 +167,7 @@ export function AiAssistantModal({
       onError(err)
     } finally {
       setLoading(false)
+      setAnalyzingStatus(null)
     }
   }
 
@@ -165,6 +223,22 @@ export function AiAssistantModal({
     setMessages((prev) => [...prev, userMsg])
     setInput('')
     setLoading(true)
+
+    if (!navigator.onLine) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          sender: 'ai',
+          text:
+            mode === 'command'
+              ? '📡 Estás en modo offline (sin conexión a internet). Puedes utilizar los controles directos del lienzo ("+ Clase", "+ Interfaz", edición y relaciones) que funcionan 100% localmente y se sincronizarán automáticamente al reconectar.'
+              : '📡 No hay conexión a internet disponible para la consulta en el servidor. Los cambios en el diagrama se siguen guardando localmente.',
+          success: false
+        }
+      ])
+      setLoading(false)
+      return
+    }
 
     try {
       if (mode === 'command') {
@@ -283,7 +357,7 @@ export function AiAssistantModal({
         {mode === 'image' ? (
           <div style={{ flex: 1, overflowY: 'auto', padding: '1rem 0', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
             <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.85rem', fontSize: '0.85rem', color: '#334155' }}>
-              <strong>Caso de Uso CU11:</strong> Sube o arrastra una foto o captura de un diagrama de clases UML (PNG, JPG, SVG). El motor de IA detectará las clases, atributos, métodos y asociaciones, reconstruyéndolos como nodos interactivos y editables en tu lienzo.
+              <strong>Caso de Uso CU11:</strong> Sube una foto o imagen de cualquier diagrama de clases UML (PNG, JPG, SVG). El motor de OCR y visión detectará automáticamente las clases, atributos, métodos, multiplicidades y relaciones, y los reconstruirá en el lienzo.
             </div>
 
             {/* Zona de carga */}
@@ -292,7 +366,7 @@ export function AiAssistantModal({
               style={{
                 border: '2px dashed #94a3b8',
                 borderRadius: '12px',
-                padding: '1.5rem',
+                padding: '1.25rem',
                 textAlign: 'center',
                 cursor: 'pointer',
                 background: imagePreview ? '#f8fafc' : '#ffffff',
@@ -315,18 +389,114 @@ export function AiAssistantModal({
                     style={{ maxHeight: '180px', maxWidth: '100%', borderRadius: '8px', objectFit: 'contain', border: '1px solid #cbd5e1' }}
                   />
                   <span style={{ fontSize: '0.8rem', color: '#475569', fontWeight: 'bold' }}>
-                    Archivo: {imageFile?.name} ({(imageFile ? imageFile.size / 1024 : 0).toFixed(1)} KB) — Clic para cambiar
+                    Archivo: {imageFile?.name} ({(imageFile ? imageFile.size / 1024 : 0).toFixed(1)} KB) — Clic para cambiar imagen
                   </span>
                 </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem', padding: '1rem 0' }}>
                   <span style={{ fontSize: '2.5rem' }}>🖼️</span>
                   <span style={{ fontWeight: 'bold', color: '#1e293b' }}>
-                    Haz clic aquí o arrastra una imagen de un diagrama UML
+                    Haz clic aquí o arrastra la imagen de tu diagrama UML
                   </span>
                   <span style={{ fontSize: '0.8rem', color: '#64748b' }}>
-                    Soporta formatos PNG, JPG, JPEG, WEBP y SVG
+                    Soporta cualquier formato: PNG, JPG, JPEG, WEBP y SVG
                   </span>
+                </div>
+              )}
+            </div>
+
+            {/* Estado de análisis OCR / Visión */}
+            {analyzingStatus && (
+              <div style={{ padding: '0.75rem 1rem', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '8px', color: '#1d4ed8', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span className="spinner-border spinner-border-sm" role="status" style={{ display: 'inline-block', width: '1rem', height: '1rem', border: '2px solid currentColor', borderRightColor: 'transparent', borderRadius: '50%', animation: 'spin 0.75s linear infinite' }}></span>
+                <span>{analyzingStatus}</span>
+              </div>
+            )}
+
+            {/* Previsualización de elementos detectados */}
+            {detectedDiagram && !analyzingStatus && (
+              <div style={{ background: '#f8fafc', border: '1px solid #cbd5e1', borderRadius: '8px', padding: '0.85rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                  <span style={{ fontWeight: 'bold', fontSize: '0.85rem', color: '#1e293b' }}>
+                    ✨ Elementos Detectados ({detectedDiagram.classes.length} clases, {detectedDiagram.relations.length} relaciones)
+                  </span>
+                  <span style={{ fontSize: '0.75rem', padding: '0.2rem 0.5rem', background: detectedDiagram.source === 'GEMINI' ? '#e0e7ff' : '#e2e8f0', color: detectedDiagram.source === 'GEMINI' ? '#3730a3' : '#334155', borderRadius: '999px', fontWeight: 'bold' }}>
+                    {detectedDiagram.source === 'GEMINI' ? 'Google Gemini Vision' : 'OCR Local Inteligente'}
+                  </span>
+                </div>
+
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                  {detectedDiagram.classes.map((c, i) => (
+                    <div key={i} style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '6px', padding: '0.4rem 0.6rem', fontSize: '0.8rem' }}>
+                      <strong style={{ color: '#2563eb' }}>{c.name}</strong>
+                      <div style={{ fontSize: '0.72rem', color: '#64748b' }}>
+                        {c.attributes.length} atributos • {c.methods.length} métodos
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {detectedDiagram.relations.length > 0 && (
+                  <div style={{ fontSize: '0.75rem', color: '#475569', borderTop: '1px dashed #cbd5e1', paddingTop: '0.4rem' }}>
+                    <strong>Relaciones:</strong>{' '}
+                    {detectedDiagram.relations.map((r, i) => (
+                      <span key={i} style={{ marginRight: '0.6rem' }}>
+                        {r.source} ({r.multSource}) ──{r.name ? `[${r.name}]` : ''}──&gt; {r.target} ({r.multTarget})
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Opciones avanzadas: Configuración opcional de Gemini Vision */}
+            <div style={{ border: '1px solid #e2e8f0', borderRadius: '8px', padding: '0.6rem 0.85rem' }}>
+              <div
+                onClick={() => setShowApiKeyInput(!showApiKeyInput)}
+                style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.8rem', color: '#475569', fontWeight: 'bold' }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <span>🔑 Clave de API de Google Gemini (Opcional - visión IA en la nube)</span>
+                  {geminiApiKey.trim() && (
+                    <span style={{ fontSize: '0.7rem', color: '#15803d', background: '#dcfce7', padding: '0.1rem 0.4rem', borderRadius: '10px' }}>
+                      ✓ Activa
+                    </span>
+                  )}
+                </div>
+                <span>{showApiKeyInput ? '▲' : '▼'}</span>
+              </div>
+
+              {showApiKeyInput && (
+                <div style={{ marginTop: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                  <div style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                    Puedes obtener una clave gratuita en <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" style={{ color: '#2563eb' }}>Google AI Studio</a>. Si no la ingresas, se usará el motor de OCR local sin conexión.
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <input
+                      type="password"
+                      value={geminiApiKey}
+                      onChange={(e) => setGeminiApiKey(e.target.value)}
+                      placeholder="Pega tu clave AIzaSy..."
+                      style={{ flex: 1, padding: '0.4rem 0.6rem', borderRadius: '4px', border: '1px solid #cbd5e1', fontSize: '0.8rem' }}
+                    />
+                    <button
+                      type="button"
+                      className="btn-sm btn-secondary"
+                      onClick={() => handleSaveGeminiKey(geminiApiKey)}
+                    >
+                      Guardar
+                    </button>
+                    {imagePreview && (
+                      <button
+                        type="button"
+                        className="btn-sm btn-primary"
+                        onClick={() => performImageAnalysis(imagePreview)}
+                        disabled={loading}
+                      >
+                        Re-analizar
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -340,7 +510,7 @@ export function AiAssistantModal({
                 type="text"
                 value={imagePromptHint}
                 onChange={(e) => setImagePromptHint(e.target.value)}
-                placeholder="Ej. 'Sistema Hospitalario', 'Facturación y Ventas', o 'Estudiante, Profesor, Asignatura'"
+                placeholder="Ej. 'Comercio Electrónico', 'Cliente, Pedido, Producto, Categoria, Pago'"
                 style={{ width: '100%', padding: '0.55rem 0.8rem', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '0.85rem' }}
               />
             </div>
@@ -361,7 +531,7 @@ export function AiAssistantModal({
                 {reconstructResult.message}
                 {reconstructResult.classes > 0 && (
                   <div style={{ marginTop: '0.3rem', fontSize: '0.8rem' }}>
-                    Se insertaron <strong>{reconstructResult.classes} clases</strong> y <strong>{reconstructResult.relations} relaciones</strong> directamente en el lienzo visual.
+                    Se insertaron <strong>{reconstructResult.classes} clases</strong> y <strong>{reconstructResult.relations} relaciones</strong> en tu lienzo visual.
                   </div>
                 )}
               </div>
@@ -375,6 +545,7 @@ export function AiAssistantModal({
                 onClick={() => {
                   setImageFile(null)
                   setImagePreview(null)
+                  setDetectedDiagram(null)
                   setReconstructResult(null)
                 }}
                 disabled={loading || !imageFile}

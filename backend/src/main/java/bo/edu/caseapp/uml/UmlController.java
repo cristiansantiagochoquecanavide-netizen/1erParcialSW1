@@ -3,6 +3,7 @@ package bo.edu.caseapp.uml;
 import bo.edu.caseapp.uml.UmlRequests.*;
 import bo.edu.caseapp.uml.UmlResponses.*;
 import bo.edu.caseapp.uml.relational.RelationalSchema;
+import bo.edu.caseapp.uml.relational.SqlDdlParserService;
 import bo.edu.caseapp.uml.validation.ValidationReport;
 import jakarta.validation.Valid;
 import java.util.List;
@@ -15,9 +16,24 @@ import org.springframework.web.bind.annotation.*;
 @RequestMapping("/api/projects/{projectId}/diagrams")
 public class UmlController {
   private final UmlService service;
+  private final SqlDdlParserService sqlDdlParserService;
 
-  public UmlController(UmlService service) {
+  public UmlController(UmlService service, SqlDdlParserService sqlDdlParserService) {
     this.service = service;
+    this.sqlDdlParserService = sqlDdlParserService;
+  }
+
+  public record ImportSqlRequest(String sql) {}
+
+  @PostMapping("/{diagramId}/import/sql")
+  @ResponseStatus(HttpStatus.OK)
+  public DiagramFullView importSql(
+      @PathVariable UUID projectId,
+      @PathVariable UUID diagramId,
+      Authentication auth,
+      @RequestBody ImportSqlRequest request
+  ) {
+    return sqlDdlParserService.parseAndImportSql(projectId, diagramId, auth.getName(), request.sql());
   }
 
   @GetMapping

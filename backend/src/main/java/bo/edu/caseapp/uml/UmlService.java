@@ -24,6 +24,7 @@ public class UmlService {
   private final ProjectService projectService;
   private final UmlValidatorService validatorService;
   private final RelationalModelService relationalModelService;
+  private final bo.edu.caseapp.uml.collab.UmlWebSocketHandler collabHandler;
 
   public UmlService(
       DiagramaClaseRepository diagrams,
@@ -33,12 +34,32 @@ public class UmlService {
       UmlValidatorService validatorService,
       RelationalModelService relationalModelService
   ) {
+    this(diagrams, elements, relations, projectService, validatorService, relationalModelService, null);
+  }
+
+  @org.springframework.beans.factory.annotation.Autowired
+  public UmlService(
+      DiagramaClaseRepository diagrams,
+      ElementoUMLRepository elements,
+      RelacionUMLRepository relations,
+      ProjectService projectService,
+      UmlValidatorService validatorService,
+      RelationalModelService relationalModelService,
+      @org.springframework.beans.factory.annotation.Autowired(required = false) bo.edu.caseapp.uml.collab.UmlWebSocketHandler collabHandler
+  ) {
     this.diagrams = diagrams;
     this.elements = elements;
     this.relations = relations;
     this.projectService = projectService;
     this.validatorService = validatorService;
     this.relationalModelService = relationalModelService;
+    this.collabHandler = collabHandler;
+  }
+
+  private void notifyCollab(UUID diagramId, String eventType) {
+    if (collabHandler != null && diagramId != null) {
+      collabHandler.broadcastDiagramChanged(diagramId, eventType);
+    }
   }
 
   @Transactional(readOnly = true)
@@ -97,6 +118,7 @@ public class UmlService {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = findDiagram(projectId, diagramId);
     diagram.update(request.nombre().trim(), clean(request.descripcion()));
+    notifyCollab(diagramId, "DIAGRAM_UPDATED");
     return summary(diagram);
   }
 
@@ -104,6 +126,7 @@ public class UmlService {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = findDiagram(projectId, diagramId);
     diagrams.delete(diagram);
+    notifyCollab(diagramId, "DIAGRAM_DELETED");
   }
 
   public ElementDetail saveElement(UUID projectId, UUID diagramId, String email, SaveElement request) {
@@ -112,18 +135,29 @@ public class UmlService {
 
     ElementoUML element;
     if (request.id() != null) {
-      element = elements.findById(request.id())
-          .orElseThrow(() -> new NotFoundException("Elemento UML no encontrado."));
-      if (!element.getDiagrama().getId().equals(diagramId)) {
-        throw new BadRequestException("El elemento no pertenece a este diagrama.");
+      java.util.Optional<ElementoUML> existing = elements.findById(request.id());
+      if (existing.isPresent()) {
+        element = existing.get();
+        if (!element.getDiagrama().getId().equals(diagramId)) {
+          throw new BadRequestException("El elemento no pertenece a este diagrama.");
+        }
+        element.update(
+            request.tipoElemento(),
+            request.nombre().trim(),
+            request.posicionX(),
+            request.posicionY(),
+            request.propiedadesJson()
+        );
+      } else {
+        element = new ElementoUML(
+            diagram,
+            request.tipoElemento(),
+            request.nombre().trim(),
+            request.posicionX(),
+            request.posicionY(),
+            request.propiedadesJson()
+        );
       }
-      element.update(
-          request.tipoElemento(),
-          request.nombre().trim(),
-          request.posicionX(),
-          request.posicionY(),
-          request.propiedadesJson()
-      );
     } else {
       element = new ElementoUML(
           diagram,
@@ -134,7 +168,9 @@ public class UmlService {
           request.propiedadesJson()
       );
     }
-    return elementDetail(elements.save(element));
+    ElementDetail saved = elementDetail(elements.save(element));
+    notifyCollab(diagramId, "ELEMENT_SAVED");
+    return saved;
   }
 
   public void syncPositions(UUID projectId, UUID diagramId, String email, SyncPositions request) {
@@ -146,9 +182,11 @@ public class UmlService {
       elements.findById(pos.id()).ifPresent(el -> {
         if (el.getDiagrama().getId().equals(diagramId)) {
           el.updatePosition(pos.posicionX(), pos.posicionY());
+          elements.save(el);
         }
       });
     }
+    notifyCollab(diagramId, "POSITIONS_SYNCED");
   }
 
   public void deleteElement(UUID projectId, UUID diagramId, String email, UUID elementId) {
@@ -162,6 +200,7 @@ public class UmlService {
     // Eliminar relaciones conectadas
     relations.deleteByElementoOrigenIdOrElementoDestinoId(elementId, elementId);
     elements.delete(element);
+    notifyCollab(diagramId, "ELEMENT_DELETED");
   }
 
   public RelationDetail saveRelation(UUID projectId, UUID diagramId, String email, SaveRelation request) {
@@ -179,17 +218,29 @@ public class UmlService {
 
     RelacionUML relation;
     if (request.id() != null) {
-      relation = relations.findById(request.id())
-          .orElseThrow(() -> new NotFoundException("Relación UML no encontrada."));
-      if (!relation.getDiagrama().getId().equals(diagramId)) {
-        throw new BadRequestException("La relación no pertenece a este diagrama.");
+      java.util.Optional<RelacionUML> existing = relations.findById(request.id());
+      if (existing.isPresent()) {
+        relation = existing.get();
+        if (!relation.getDiagrama().getId().equals(diagramId)) {
+          throw new BadRequestException("La relación no pertenece a este diagrama.");
+        }
+        relation.update(
+            clean(request.nombreRelacion()),
+            request.tipoRelacion(),
+            clean(request.multiplicidadOrigen()),
+            clean(request.multiplicidadDestino())
+        );
+      } else {
+        relation = new RelacionUML(
+            diagram,
+            origen,
+            destino,
+            clean(request.nombreRelacion()),
+            request.tipoRelacion(),
+            clean(request.multiplicidadOrigen()),
+            clean(request.multiplicidadDestino())
+        );
       }
-      relation.update(
-          clean(request.nombreRelacion()),
-          request.tipoRelacion(),
-          clean(request.multiplicidadOrigen()),
-          clean(request.multiplicidadDestino())
-      );
     } else {
       relation = new RelacionUML(
           diagram,
@@ -201,7 +252,9 @@ public class UmlService {
           clean(request.multiplicidadDestino())
       );
     }
-    return relationDetail(relations.save(relation));
+    RelationDetail saved = relationDetail(relations.save(relation));
+    notifyCollab(diagramId, "RELATION_SAVED");
+    return saved;
   }
 
   public void deleteRelation(UUID projectId, UUID diagramId, String email, UUID relationId) {
@@ -213,6 +266,7 @@ public class UmlService {
       throw new BadRequestException("La relación no pertenece a este diagrama.");
     }
     relations.delete(relation);
+    notifyCollab(diagramId, "RELATION_DELETED");
   }
 
   private DiagramaClase findDiagram(UUID projectId, UUID diagramId) {

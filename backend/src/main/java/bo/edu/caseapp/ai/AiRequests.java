@@ -1,9 +1,7 @@
 package bo.edu.caseapp.ai;
 
-import bo.edu.caseapp.uml.UmlResponses.DiagramFullView;
 import jakarta.validation.constraints.NotBlank;
-import java.time.Instant;
-import java.util.UUID;
+import java.util.List;
 
 public final class AiRequests {
   private AiRequests() {}
@@ -19,6 +17,38 @@ public final class AiRequests {
   public record ReconstructImageRequest(
       @NotBlank String imageBase64,
       String filename,
-      String promptHint
+      String promptHint,
+      String geminiApiKey,
+      List<ClientDetectedClass> clientDetectedClasses,
+      List<ClientDetectedRelation> clientDetectedRelations
+  ) {}
+
+  public record ClientDetectedClass(
+      String name,
+      Double posX,
+      Double posY,
+      List<ClientDetectedAttr> attributes,
+      List<ClientDetectedMethod> methods
+  ) {}
+
+  public record ClientDetectedAttr(
+      String visibility,
+      String name,
+      String type
+  ) {}
+
+  public record ClientDetectedMethod(
+      String visibility,
+      String name,
+      String returnType
+  ) {}
+
+  public record ClientDetectedRelation(
+      String source,
+      String target,
+      String name,
+      String tipo,
+      String multSource,
+      String multTarget
   ) {}
 }

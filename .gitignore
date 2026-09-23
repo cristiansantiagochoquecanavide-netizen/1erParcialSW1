@@ -6,4 +6,8 @@
 **/target/
 .idea/
 .vscode/
+antigravity.jsonc
+*.pdf
+*.eap
+*.ldb
 

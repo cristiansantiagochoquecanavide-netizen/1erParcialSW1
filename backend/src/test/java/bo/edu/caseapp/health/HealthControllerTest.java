@@ -17,6 +17,7 @@ import org.springframework.test.web.servlet.MockMvc;
 class HealthControllerTest {
   @Autowired private MockMvc mockMvc;
   @MockBean private HealthService healthService;
+  @MockBean private bo.edu.caseapp.auth.JwtAuthenticationFilter jwtAuthenticationFilter;
 
   @Test
   void returnsBackendAndDatabaseStatus() throws Exception {
