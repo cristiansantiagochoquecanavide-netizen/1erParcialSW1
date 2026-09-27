@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Instala dependencias
 COPY package*.json ./
-RUN npm install
+RUN npm ci
 
 # Copia código fuente y compila la SPA
 COPY . .

@@ -3,3 +3,10 @@ target/
 .gitignore
 *.iml
 .idea/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.jks
