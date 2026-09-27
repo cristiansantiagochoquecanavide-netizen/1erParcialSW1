@@ -32,7 +32,7 @@ export interface RecognizedRelation {
 export interface RecognizedDiagram {
   classes: RecognizedClass[]
   relations: RecognizedRelation[]
-  source: 'OCR' | 'GEMINI'
+  source: 'OCR'
 }
 
 function parseVisibility(str: string): { vis: string; rest: string } {
@@ -104,114 +104,6 @@ function cleanMultiplicity(raw: string): string | null {
   if (s === '1') return '1'
   if (s === '0') return '0'
   if (s === '*' || s === 'n' || s === 'm') return '*'
-  return null
-}
-
-export async function recognizeDiagramWithGemini(
-  base64Image: string,
-  apiKey: string
-): Promise<RecognizedDiagram | null> {
-  if (!apiKey || !apiKey.trim()) return null
-
-  try {
-    const cleanBase64 = base64Image.includes(',')
-      ? base64Image.substring(base64Image.indexOf(',') + 1)
-      : base64Image
-
-    const mimeType = base64Image.startsWith('data:image/png') ? 'image/png' : 'image/jpeg'
-
-    const prompt = `You are an expert UML Reverse Engineering system.
-Analyze this UML diagram image in detail.
-Extract EVERY class shown with:
-- name: PascalCase class name
-- attributes: array of { visibility: ("+"|"-"|"#"|"~"), name: string, type: string }
-- methods: array of { visibility: ("+"|"-"|"#"|"~"), name: string, returnType: string }
-- posX: estimated X coordinate keeping the exact relative layout from the image (scale range 80 to 850)
-- posY: estimated Y coordinate keeping the exact relative layout from the image (scale range 60 to 450)
-
-Extract EVERY relationship shown with:
-- source: source class name (where the arrow starts, or left/top class)
-- target: target class name (where the arrow points, or right/bottom class)
-- name: relationship label if present (e.g. "realiza", "contiene", "clasifica", "tiene", "asocia", "pertenece")
-- tipo: "ASOCIACION" | "HERENCIA" | "AGREGACION" | "COMPOSICION" | "DEPENDENCIA"
-- multSource: multiplicity at source (e.g. "1", "1..*", "0..*")
-- multTarget: multiplicity at target (e.g. "*", "0..1", "0..*", "1")
-
-Return ONLY valid JSON matching this exact structure without markdown or explanation:
-{
-  "classes": [
-    {
-      "name": "Cliente",
-      "posX": 100,
-      "posY": 60,
-      "attributes": [{ "visibility": "-", "name": "id", "type": "Long" }],
-      "methods": [{ "visibility": "+", "name": "actualizarDatos", "returnType": "void" }]
-    }
-  ],
-  "relations": [
-    {
-      "source": "Cliente",
-      "target": "Pedido",
-      "name": "realiza",
-      "tipo": "ASOCIACION",
-      "multSource": "1",
-      "multTarget": "0..*"
-    }
-  ]
-}`
-
-    const models = ['gemini-2.0-flash', 'gemini-1.5-flash']
-    for (const model of models) {
-      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey.trim()}`
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                { text: prompt },
-                {
-                  inline_data: {
-                    mime_type: mimeType,
-                    data: cleanBase64
-                  }
-                }
-              ]
-            }
-          ],
-          generationConfig: {
-            response_mime_type: 'application/json'
-          }
-        })
-      })
-
-      if (res.ok) {
-        const data = await res.json()
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text
-        if (text) {
-          const parsed = JSON.parse(text)
-          if (Array.isArray(parsed.classes) && parsed.classes.length > 0) {
-            const rawRels: RecognizedRelation[] = Array.isArray(parsed.relations) ? parsed.relations : []
-            const validRels = rawRels.filter(r => {
-              return r.source && r.target && r.source.toLowerCase() !== r.target.toLowerCase()
-            })
-
-            return {
-              classes: parsed.classes,
-              relations: validRels,
-              source: 'GEMINI'
-            }
-          }
-        }
-      } else {
-        const errText = await res.text().catch(() => '')
-        console.warn(`Gemini Vision [${model}] falló con status ${res.status}:`, errText)
-      }
-    }
-  } catch (err) {
-    console.warn('Error durante reconocimiento con Gemini Vision:', err)
-  }
   return null
 }
 

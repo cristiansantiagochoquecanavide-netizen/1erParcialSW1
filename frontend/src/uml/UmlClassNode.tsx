@@ -30,20 +30,39 @@ function UmlClassNodeComponent({ data, selected }: NodeProps<UmlNodeType>) {
 
   const isAbstract = data.elementType === 'CLASE_ABSTRACTA'
 
+  const handleDefinitions = [
+    { side: Position.Top, axis: 'left' as const },
+    { side: Position.Right, axis: 'top' as const },
+    { side: Position.Bottom, axis: 'left' as const },
+    { side: Position.Left, axis: 'top' as const }
+  ]
+
+  const renderConnectionHandles = (type: 'source' | 'target') =>
+    handleDefinitions.flatMap(({ side, axis }) =>
+      (type === 'source' ? [20, 50, 80] : [30, 60, 90]).map((offset, index) => {
+        const sideName = side.toLowerCase()
+        const style = axis === 'left'
+          ? { left: `${offset}%` }
+          : { top: `${offset}%` }
+
+        return (
+          <Handle
+            key={`${sideName}-${type}-${offset}`}
+            type={type}
+            position={side}
+            id={`${sideName}-${type}-${index}`}
+            className="uml-edge-handle"
+            style={style}
+          />
+        )
+      })
+    )
+
   return (
     <div className={`uml-node-card ${selected ? 'selected' : ''} ${data.elementType.toLowerCase()}`}>
       {/* Handles para conexiones de relaciones UML */}
-      <Handle type="target" position={Position.Top} id="top-target" />
-      <Handle type="source" position={Position.Top} id="top-source" />
-
-      <Handle type="target" position={Position.Right} id="right-target" />
-      <Handle type="source" position={Position.Right} id="right-source" />
-
-      <Handle type="target" position={Position.Bottom} id="bottom-target" />
-      <Handle type="source" position={Position.Bottom} id="bottom-source" />
-
-      <Handle type="target" position={Position.Left} id="left-target" />
-      <Handle type="source" position={Position.Left} id="left-source" />
+      {renderConnectionHandles('target')}
+      {renderConnectionHandles('source')}
 
       {/* Cabecera del elemento UML */}
       <div className="uml-node-header">

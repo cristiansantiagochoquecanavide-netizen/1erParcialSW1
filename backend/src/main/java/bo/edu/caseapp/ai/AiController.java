@@ -42,14 +42,24 @@ public class AiController {
     return aiService.chat(projectId, diagramId, auth.getName(), request);
   }
 
-  @PostMapping("/reconstruct-image")
-  public AiResponses.ImageReconstructionResponse reconstructFromImage(
+  @PostMapping({"/apply-image-model", "/reconstruct-image"})
+  public AiResponses.ImageReconstructionResponse applyImageModel(
       @PathVariable UUID projectId,
       @PathVariable UUID diagramId,
       Authentication auth,
-      @Valid @RequestBody AiRequests.ReconstructImageRequest request
+      @Valid @RequestBody AiRequests.ApplyImageModelRequest request
   ) {
-    return aiService.reconstructFromImage(projectId, diagramId, auth.getName(), request);
+    return aiService.applyImageModel(projectId, diagramId, auth.getName(), request);
+  }
+
+  @PostMapping("/analyze-image")
+  public AiResponses.ImageAnalysisResponse analyzeImage(
+      @PathVariable UUID projectId,
+      @PathVariable UUID diagramId,
+      Authentication auth,
+      @Valid @RequestBody AiRequests.AnalyzeImageRequest request
+  ) {
+    return aiService.analyzeImage(projectId, diagramId, auth.getName(), request);
   }
 
   @GetMapping("/history")

@@ -1,0 +1,114 @@
+.xmi-modal-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  min-width: 0;
+}
+
+.xmi-format-switcher {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem !important;
+  margin-top: 0 !important;
+  border: 0 !important;
+  padding: 0 !important;
+}
+
+.xmi-format-switcher .tab-btn {
+  flex: 1 1 220px;
+  min-height: 2.5rem;
+  border: 1px solid #cbd5e1 !important;
+  border-radius: 10px !important;
+  font-size: 0.8rem;
+  text-align: left;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+
+.xmi-format-switcher .tab-btn:hover {
+  border-color: #60a5fa !important;
+  transform: translateY(-1px);
+}
+
+.xmi-sections {
+  margin-top: 0 !important;
+  gap: 0.85rem !important;
+}
+
+.xmi-section {
+  min-width: 0;
+  padding: 1rem !important;
+  border: 1px solid #e2e8f0 !important;
+  border-radius: 14px !important;
+  background: #f8fafc !important;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.04);
+}
+
+.xmi-section h4 {
+  color: #0f172a;
+  font-size: 0.95rem;
+  letter-spacing: -0.01em;
+}
+
+.xmi-section p {
+  max-width: 62ch;
+  line-height: 1.45;
+}
+
+.xmi-file-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.6rem;
+  border: 1px dashed #94a3b8;
+  border-radius: 9px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 0.82rem;
+}
+
+.xmi-import-textarea {
+  display: block;
+  box-sizing: border-box;
+  width: 100% !important;
+  min-height: 170px;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid #cbd5e1 !important;
+  border-radius: 10px !important;
+  background: #ffffff;
+  color: #0f172a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+  font-size: 0.78rem !important;
+  line-height: 1.5;
+}
+
+.xmi-modal-actions {
+  margin-top: 0.1rem !important;
+  padding-top: 0.85rem;
+  border-top: 1px solid #e2e8f0;
+}
+
+.xmi-modal-actions .btn {
+  min-width: 6.5rem;
+  border-radius: 9px !important;
+}
+
+@media (max-width: 640px) {
+  .xmi-format-switcher .tab-btn {
+    flex-basis: 100%;
+  }
+
+  .xmi-section {
+    padding: 0.85rem !important;
+  }
+
+  .xmi-section > div:first-child {
+    align-items: flex-start !important;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .xmi-section button {
+    width: 100%;
+    justify-content: center;
+  }
+}

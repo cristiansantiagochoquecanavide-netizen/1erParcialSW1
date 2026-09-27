@@ -13,8 +13,15 @@ public final class UmlResponses {
       String nombre,
       String descripcion,
       String estado,
-      Instant fechaCreacion
-  ) { }
+      Instant fechaCreacion,
+      boolean bloqueado,
+      String bloqueadoPor,
+      Instant fechaBloqueo
+  ) {
+    public DiagramSummary(UUID id, UUID projectId, String nombre, String descripcion, String estado, Instant fechaCreacion) {
+      this(id, projectId, nombre, descripcion, estado, fechaCreacion, false, null, null);
+    }
+  }
 
   public record ElementDetail(
       UUID id,

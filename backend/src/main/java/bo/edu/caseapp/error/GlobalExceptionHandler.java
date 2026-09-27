@@ -7,6 +7,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -14,8 +16,18 @@ public class GlobalExceptionHandler {
   public ResponseEntity<ApiError> handleNotFound(NotFoundException exception) { return response(HttpStatus.NOT_FOUND, exception.getMessage()); }
   @ExceptionHandler({ForbiddenException.class, org.springframework.security.access.AccessDeniedException.class})
   public ResponseEntity<ApiError> handleForbidden(Exception exception) { return response(HttpStatus.FORBIDDEN, exception.getMessage()); }
-  @ExceptionHandler({BadRequestException.class, MethodArgumentNotValidException.class})
-  public ResponseEntity<ApiError> handleBadRequest(Exception exception) { return response(HttpStatus.BAD_REQUEST, exception.getMessage()); }
+  @ExceptionHandler(BadRequestException.class)
+  public ResponseEntity<ApiError> handleBadRequest(BadRequestException exception) { return response(HttpStatus.BAD_REQUEST, exception.getMessage()); }
+  @ExceptionHandler(MethodArgumentNotValidException.class)
+  public ResponseEntity<ApiError> handleValidation(MethodArgumentNotValidException exception) {
+    String message = exception.getBindingResult().getFieldErrors().stream()
+        .findFirst().map(error -> error.getDefaultMessage()).orElse("Los datos enviados no son válidos.");
+    return response(HttpStatus.BAD_REQUEST, message);
+  }
+  @ExceptionHandler(DataIntegrityViolationException.class)
+  public ResponseEntity<ApiError> handleConflict(DataIntegrityViolationException exception) { return response(HttpStatus.BAD_REQUEST, "El correo ya está registrado."); }
+  @ExceptionHandler(HttpMessageNotReadableException.class)
+  public ResponseEntity<ApiError> handleUnreadable(HttpMessageNotReadableException exception) { return response(HttpStatus.BAD_REQUEST, "La solicitud no tiene un formato JSON válido. Revisa los caracteres enviados."); }
   private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
   @ExceptionHandler(Exception.class)

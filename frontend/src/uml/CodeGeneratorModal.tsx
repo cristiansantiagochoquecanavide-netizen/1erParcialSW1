@@ -122,7 +122,7 @@ export function CodeGeneratorModal({
     <div className="uml-modal-backdrop">
       <div className="uml-modal generator-modal" style={{ maxWidth: preview ? '1050px' : '650px' }}>
         <div className="uml-modal-header">
-          <h3>⚡ Generación Automática de Software (Spring Boot + React)</h3>
+          <h3>Generación Automática de Software (Spring Boot + React)</h3>
           <button type="button" className="close-btn" onClick={onClose}>
             ✕
           </button>

@@ -2,10 +2,19 @@ package bo.edu.caseapp.ai;
 
 import bo.edu.caseapp.ai.AiRequests.ChatRequest;
 import bo.edu.caseapp.ai.AiRequests.CommandRequest;
-import bo.edu.caseapp.ai.AiRequests.ReconstructImageRequest;
+import bo.edu.caseapp.ai.AiRequests.AnalyzeImageRequest;
+import bo.edu.caseapp.ai.AiRequests.ApplyImageModelRequest;
+import bo.edu.caseapp.ai.AiRequests.ImageClass;
+import bo.edu.caseapp.ai.AiRequests.ImageAttribute;
+import bo.edu.caseapp.ai.AiRequests.ImageImportMode;
+import bo.edu.caseapp.ai.AiRequests.ImageMethod;
+import bo.edu.caseapp.ai.AiRequests.ImageModel;
+import bo.edu.caseapp.ai.AiRequests.ImageRelation;
 import bo.edu.caseapp.ai.AiResponses.ChatResponse;
 import bo.edu.caseapp.ai.AiResponses.CommandResponse;
+import bo.edu.caseapp.ai.AiResponses.ImageAnalysisResponse;
 import bo.edu.caseapp.ai.AiResponses.ImageReconstructionResponse;
+import bo.edu.caseapp.error.BadRequestException;
 import bo.edu.caseapp.error.NotFoundException;
 import bo.edu.caseapp.project.ProjectService;
 import bo.edu.caseapp.uml.*;
@@ -17,14 +26,15 @@ import bo.edu.caseapp.user.UserRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.*;
+import java.text.Normalizer;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -41,6 +51,8 @@ public class AiAssistantService {
   private final UmlService umlService;
   private final bo.edu.caseapp.uml.relational.SqlDdlParserService sqlDdlParserService;
   private final bo.edu.caseapp.uml.collab.UmlWebSocketHandler wsHandler;
+  private final String geminiApiKey;
+  private final String geminiModel;
   private final ObjectMapper objectMapper = new ObjectMapper();
 
   public AiAssistantService(
@@ -52,7 +64,9 @@ public class AiAssistantService {
       UserRepository userRepo,
       UmlService umlService,
       bo.edu.caseapp.uml.relational.SqlDdlParserService sqlDdlParserService,
-      bo.edu.caseapp.uml.collab.UmlWebSocketHandler wsHandler
+      bo.edu.caseapp.uml.collab.UmlWebSocketHandler wsHandler,
+      @Value("${app.gemini.api-key:}") String geminiApiKey,
+      @Value("${app.gemini.model:gemini-3.8-flash}") String geminiModel
   ) {
     this.diagramRepo = diagramRepo;
     this.elementRepo = elementRepo;
@@ -63,19 +77,36 @@ public class AiAssistantService {
     this.umlService = umlService;
     this.sqlDdlParserService = sqlDdlParserService;
     this.wsHandler = wsHandler;
+    this.geminiApiKey = geminiApiKey;
+    this.geminiModel = geminiModel;
   }
 
   public CommandResponse executeCommand(UUID projectId, UUID diagramId, String email, CommandRequest request) {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = validateDiagram(projectId, diagramId);
+    umlService.requireNotLocked(diagram, email);
+
     User user = userRepo.findByEmailIgnoreCase(email)
         .orElseThrow(() -> new NotFoundException("Usuario no encontrado."));
 
-    String raw = request.command().trim();
+    if (!"GEMINI_CANONICAL".equals(request.resolvedSource()) && !looksLikeSqlDdl(request.command())) {
+      List<String> interpretedCommands = interpretCommandWithGemini(diagramId, request.command());
+      if (interpretedCommands != null && !interpretedCommands.isEmpty()) {
+        CommandResponse lastResponse = null;
+        for (String interpretedCommand : interpretedCommands) {
+          lastResponse = executeCommand(projectId, diagramId, email,
+              new CommandRequest(interpretedCommand, "GEMINI_CANONICAL",
+                  request.selectedElementId(), request.selectedRelationId()));
+        }
+        return lastResponse;
+      }
+    }
+
+    String raw = normalizeVoiceCommand(request.command().trim());
     String normalized = raw.toLowerCase();
 
     String actionType = "DESCONOCIDO";
-    String message = "No se pudo interpretar el comando de modelado. Prueba con: 'Crear clase Producto', 'Agregar atributo precio Double a Producto', o 'Relacionar Cliente con Pedido 1 a N'.";
+    String message = "No se pudo interpretar el comando de modelado. Prueba con: 'Crear clase Cliente', 'Ponle nombre, correo y teléfono', 'Relacionar Cliente con Pedido', 'Uno a muchos', 'Cambia esa relación a composición'.";
     boolean success = false;
 
     try {
@@ -86,17 +117,42 @@ public class AiAssistantService {
         DiagramFullView fullView = sqlDdlParserService.parseAndImportSql(projectId, diagramId, email, sqlPart);
         actionType = "SQL_IMPORTADO";
         message = "Script SQL DDL reconocido y procesado exitosamente. Tablas, atributos, tipos, claves primarias y relaciones foráneas creadas en el modelo.";
-        InteraccionIa ia = new InteraccionIa(diagram, user, request.source() != null ? request.source() : "TEXT", raw, message, actionType);
+        InteraccionIa ia = new InteraccionIa(diagram, user, request.resolvedSource(), raw, message, actionType);
         iaRepo.save(ia);
         return new CommandResponse(true, actionType, message, fullView);
       }
 
       // 1. CREAR ELEMENTO (CLASE, INTERFAZ, ABSTRACTA, ENUM)
-      // Ejemplos: "crear clase Producto", "crea una clase Cliente con atributos nombre:String, email:String"
-      Pattern pCrearClase = Pattern.compile("(?i)(?:crear|crea|nueva|nuevo|agrega|agregar)\\s+(?:una?\\s+)?(clase|interfaz|abstracta|clase abstracta|enum|enumeracion)\\s+([a-zA-Z0-9_]+)(?:\\s+con\\s+(?:atributos|campos)?\\s*(.*))?");
+      // Ejemplos: "crear clase Producto", "agrega una clase Pedido", "crea una interfaz IRepositorio"
+      Pattern pCrearClase = Pattern.compile("(?i)^(?:crear|crea|nueva|nuevo|agrega|agregar|anadir|anade)\\s+(?:una?\\s+)?(clase(?:\\s+abstracta)?|interfaz|abstracta|enum|enumeracion)\\s+(?:(?:llamada|llamado|de\\s+nombre)\\s+)?([A-Za-z][A-Za-z0-9_]*)(?:\\s+con\\s+(?:atributos|campos)?\\s*(.*))?$");
       Matcher mCrear = pCrearClase.matcher(raw);
+      Pattern pIntermediate = Pattern.compile("(?i)^crear\\s+(?:una?\\s+)?clase\\s+intermedia\\s+([a-zA-Z0-9_]+)\\s+entre\\s+([a-zA-Z0-9_]+)\\s+y\\s+([a-zA-Z0-9_]+)$");
+      Matcher mIntermediate = pIntermediate.matcher(raw);
 
-      if (mCrear.find()) {
+      if (mIntermediate.find()) {
+        String middleName = mIntermediate.group(1);
+        String leftName = mIntermediate.group(2);
+        String rightName = mIntermediate.group(3);
+        ObjectNode middleProps = objectMapper.createObjectNode();
+        middleProps.putArray("attributes");
+        middleProps.putArray("methods");
+        umlService.saveElement(projectId, diagramId, email,
+            new SaveElement(null, TipoElementoUML.CLASE, middleName, 300.0, 150.0, middleProps.toString()));
+
+        List<ElementoUML> currentElements = elementRepo.findByDiagramaId(diagramId);
+        Optional<ElementoUML> middle = currentElements.stream().filter(e -> e.getNombre().equalsIgnoreCase(middleName)).findFirst();
+        Optional<ElementoUML> left = currentElements.stream().filter(e -> e.getNombre().equalsIgnoreCase(leftName)).findFirst();
+        Optional<ElementoUML> right = currentElements.stream().filter(e -> e.getNombre().equalsIgnoreCase(rightName)).findFirst();
+        if (middle.isPresent() && left.isPresent() && right.isPresent()) {
+          umlService.saveRelation(projectId, diagramId, email,
+              new SaveRelation(null, left.get().getId(), middle.get().getId(), null, TipoRelacionUML.ASOCIACION, "1", "*"));
+          umlService.saveRelation(projectId, diagramId, email,
+              new SaveRelation(null, right.get().getId(), middle.get().getId(), null, TipoRelacionUML.ASOCIACION, "1", "*"));
+        }
+        actionType = "CREAR_CLASE_INTERMEDIA";
+        message = "Se creó la clase intermedia «" + middleName + "» entre «" + leftName + "» y «" + rightName + "».";
+        success = true;
+      } else if (mCrear.find()) {
         String tipoStr = mCrear.group(1).trim().toLowerCase();
         String nombreClase = mCrear.group(2).trim();
         String atributosRaw = mCrear.group(3);
@@ -108,12 +164,11 @@ public class AiAssistantService {
           default -> TipoElementoUML.CLASE;
         };
 
-        // Parsear atributos si fueron especificados (sin atributos por defecto)
         ObjectNode propNode = objectMapper.createObjectNode();
         ArrayNode attrs = propNode.putArray("attributes");
 
         if (atributosRaw != null && !atributosRaw.isBlank()) {
-          String[] tokens = atributosRaw.split("[,;]");
+          String[] tokens = atributosRaw.split("[,;y]");
           for (String token : tokens) {
             String t = token.trim();
             if (t.isEmpty()) continue;
@@ -139,71 +194,130 @@ public class AiAssistantService {
         SaveElement createDto = new SaveElement(null, tipo, nombreClase, posX, posY, propNode.toString());
         umlService.saveElement(projectId, diagramId, email, createDto);
 
-        actionType = "ELEMENTO_CREADO";
+        actionType = "CREAR_CLASE";
         message = "Se ha creado con éxito el elemento «" + nombreClase + "» de tipo " + tipo + " en el diagrama.";
         success = true;
 
-      } else if (normalized.matches(".*(eliminar|borrar|elimina|borra)\\s+(?:la\\s+)?(clase|interfaz|abstracta|enum|elemento)\\s+([a-zA-Z0-9_]+).*")) {
-        // 2. ELIMINAR ELEMENTO
-        Pattern pEliminar = Pattern.compile("(?i)(?:eliminar|borrar|elimina|borra)\\s+(?:la\\s+)?(?:clase|interfaz|abstracta|enum|elemento)\\s+([a-zA-Z0-9_]+)");
-        Matcher mDel = pEliminar.matcher(raw);
+      } else if (normalized.matches(".*(ponle|agrega|agregar|anade|añade|incluye|anadir|añadir)\\s+(.*)")) {
+        // 2. ATRIBUTOS CONTEXTUALES: "Ponle nombre, correo y teléfono" o "Agrega fecha a Pedido"
+        String body = raw.replaceFirst("(?i)^.*(ponle|agrega|agregar|anade|añade|incluye|anadir|añadir)\\s+", "").trim();
+        List<ElementoUML> list = elementRepo.findByDiagramaId(diagramId);
+
+        ElementoUML target = null;
+        String attrsString = body;
+
+        // Admite tanto "nombre String a Producto" como "a Producto nombre String".
+        Matcher targetPrefix = Pattern.compile("(?i)^a\\s+([A-Za-z][A-Za-z0-9_]*)\\s+(.+)$").matcher(body);
+        if (targetPrefix.matches()) {
+          target = list.stream().filter(e -> e.getNombre().equalsIgnoreCase(targetPrefix.group(1))).findFirst().orElse(null);
+          attrsString = targetPrefix.group(2).trim();
+        } else if (body.toLowerCase().contains(" a ") || body.toLowerCase().contains(" en ")) {
+          String[] parts = body.toLowerCase().contains(" a ") ? body.split("(?i)\\s+a\\s+") : body.split("(?i)\\s+en\\s+");
+          attrsString = parts[0].trim();
+          String targetClassName = parts[1].trim().replaceAll("[^a-zA-Z0-9_]", "");
+          target = list.stream().filter(e -> e.getNombre().equalsIgnoreCase(targetClassName)).findFirst().orElse(null);
+        }
+
+        // Si no especificó clase explícita, usar el elemento seleccionado o el último elemento creado
+        if (target == null && request.selectedElementId() != null && !request.selectedElementId().isBlank()) {
+          try {
+            UUID selId = UUID.fromString(request.selectedElementId());
+            target = list.stream().filter(e -> e.getId().equals(selId)).findFirst().orElse(null);
+          } catch (Exception ignored) {}
+        }
+        if (target == null && !list.isEmpty()) {
+          target = list.get(list.size() - 1);
+        }
+
+        if (target != null) {
+          // Limpiar palabras "atributo", "atributos"
+          attrsString = attrsString.replaceAll("(?i)^atributos?\\s+", "").trim();
+          String[] tokens = attrsString.split("[,;y]|\n");
+          ObjectNode root = (ObjectNode) objectMapper.readTree(target.getPropiedadesJson());
+          ArrayNode attrsNode = (ArrayNode) root.path("attributes");
+          int addedCount = 0;
+
+          for (String token : tokens) {
+            String t = token.trim();
+            if (t.isEmpty()) continue;
+            String aName = t;
+            String aType = "String";
+            if (t.contains(":") || t.contains(" ")) {
+              String[] p = t.contains(":") ? t.split(":") : t.split("\\s+");
+              aName = p[0].trim();
+              if (p.length > 1) aType = p[1].trim();
+            }
+            aName = aName.replaceAll("[^a-zA-Z0-9_]", "");
+            if (aName.equalsIgnoreCase("fecha")) aType = "Date";
+            if (aName.equalsIgnoreCase("total") || aName.equalsIgnoreCase("precio") || aName.equalsIgnoreCase("monto")) aType = "Double";
+            if (aName.equalsIgnoreCase("id")) aType = "Long";
+
+            if (!aName.isEmpty()) {
+              attrsNode.addObject()
+                  .put("id", UUID.randomUUID().toString())
+                  .put("visibility", "+")
+                  .put("name", aName)
+                  .put("type", capitalizeType(aType));
+              addedCount++;
+            }
+          }
+
+          target.setPropiedadesJson(root.toString());
+          elementRepo.save(target);
+
+          actionType = "AGREGAR_ATRIBUTO";
+          message = "Se agregaron " + addedCount + " atributo(s) a la clase «" + target.getNombre() + "».";
+          success = true;
+        } else {
+          message = "No hay ninguna clase en el diagrama a la cual agregar los atributos.";
+        }
+
+      } else if (normalized.matches(".*(eliminar|borrar|elimina|borra)\\s+.*")) {
+        // 3. ELIMINAR ELEMENTO O RELACIÓN: "Elimina Cliente", "Borra la clase Pedido"
+        Pattern pElim = Pattern.compile("(?i)(?:eliminar|borrar|elimina|borra)\\s+(?:la\\s+)?(?:clase|interfaz|abstracta|enum|elemento)?\\s*([a-zA-Z0-9_]+)");
+        Matcher mDel = pElim.matcher(raw);
         if (mDel.find()) {
-          String nombreClase = mDel.group(1).trim();
+          String targetName = mDel.group(1).trim();
           List<ElementoUML> list = elementRepo.findByDiagramaId(diagramId);
           Optional<ElementoUML> target = list.stream()
-              .filter(e -> e.getNombre().equalsIgnoreCase(nombreClase))
+              .filter(e -> e.getNombre().equalsIgnoreCase(targetName))
               .findFirst();
 
           if (target.isPresent()) {
             umlService.deleteElement(projectId, diagramId, email, target.get().getId());
-            actionType = "ELEMENTO_ELIMINADO";
-            message = "Se ha eliminado «" + nombreClase + "» y sus relaciones asociadas del diagrama.";
+            actionType = "ELIMINAR_CLASE";
+            message = "Se ha eliminado la clase «" + targetName + "» y sus relaciones asociadas.";
             success = true;
           } else {
-            message = "No se encontró ningún elemento llamado «" + nombreClase + "» en el diagrama.";
+            message = "No se encontró ningún elemento llamado «" + targetName + "».";
           }
         }
 
-      } else if (normalized.matches(".*(agregar|agrega|anadir|anade)\\s+atributo\\s+.*")) {
-        // 3. AGREGAR ATRIBUTO A CLASE
-        // Ejemplo: "agregar atributo precio Double a Producto"
-        Pattern pAttr = Pattern.compile("(?i)(?:agregar|agrega|anadir|anade)\\s+atributo\\s+([a-zA-Z0-9_]+)(?:\\s+(?:de\\s+tipo\\s+)?([a-zA-Z0-9_]+))?\\s+(?:a|en)\\s+([a-zA-Z0-9_]+)");
-        Matcher mAttr = pAttr.matcher(raw);
-        if (mAttr.find()) {
-          String attrName = mAttr.group(1).trim();
-          String attrType = mAttr.group(2) != null ? mAttr.group(2).trim() : "String";
-          String targetClass = mAttr.group(3).trim();
+      } else if (normalized.matches(".*(renombra|renombrar|cambiar nombre)\\s+.*")) {
+        // 4. EDITAR CLASE: "Renombra la clase Cliente a Comprador"
+        Pattern pRen = Pattern.compile("(?i)(?:renombra|renombrar|cambiar nombre)\\s+(?:la\\s+clase\\s+)?([a-zA-Z0-9_]+)\\s+a\\s+([a-zA-Z0-9_]+)");
+        Matcher mRen = pRen.matcher(raw);
+        if (mRen.find()) {
+          String oldName = mRen.group(1).trim();
+          String newName = mRen.group(2).trim();
 
           List<ElementoUML> list = elementRepo.findByDiagramaId(diagramId);
-          Optional<ElementoUML> target = list.stream()
-              .filter(e -> e.getNombre().equalsIgnoreCase(targetClass))
-              .findFirst();
-
+          Optional<ElementoUML> target = list.stream().filter(e -> e.getNombre().equalsIgnoreCase(oldName)).findFirst();
           if (target.isPresent()) {
             ElementoUML el = target.get();
-            ObjectNode root = (ObjectNode) objectMapper.readTree(el.getPropiedadesJson());
-            ArrayNode attrs = (ArrayNode) root.path("attributes");
-            attrs.addObject()
-                .put("id", UUID.randomUUID().toString())
-                .put("visibility", "+")
-                .put("name", attrName)
-                .put("type", capitalizeType(attrType));
-
-            el.setPropiedadesJson(root.toString());
-            elementRepo.save(el);
-
-            actionType = "ATRIBUTO_AGREGADO";
-            message = "Atributo «" + attrName + ": " + capitalizeType(attrType) + "» agregado a la clase «" + targetClass + "».";
+            SaveElement updateDto = new SaveElement(el.getId(), el.getTipoElemento(), newName, el.getPosicionX(), el.getPosicionY(), el.getPropiedadesJson());
+            umlService.saveElement(projectId, diagramId, email, updateDto);
+            actionType = "EDITAR_CLASE";
+            message = "Se renombró la clase «" + oldName + "» a «" + newName + "».";
             success = true;
           } else {
-            message = "No se encontró la clase «" + targetClass + "».";
+            message = "No se encontró la clase «" + oldName + "».";
           }
         }
 
       } else if (normalized.matches(".*(relacionar|relaciona|conectar|conecta)\\s+([a-zA-Z0-9_]+)\\s+con\\s+([a-zA-Z0-9_]+).*")) {
-        // 4. CREAR RELACIÓN
-        // Ejemplo: "relacionar Cliente con Pedido 1 a N" o "relacionar Auto con Motor composicion"
-        Pattern pRel = Pattern.compile("(?i)(?:relacionar|relaciona|conectar|conecta)\\s+([a-zA-Z0-9_]+)\\s+con\\s+([a-zA-Z0-9_]+)(?:\\s+(?:de\\s+tipo\\s+)?(herencia|asociacion|agregacion|composicion|dependencia))?(?:\\s+(?:con\\s+)?(?:multiplicidad|cardinalidad)?\\s*(1\\s*a\\s*n|n\\s*a\\s*m|1\\s*a\\s*1|uno\\s*a\\s*muchos|muchos\\s*a\\s*muchos))?");
+        // 5. CREAR RELACIÓN
+        Pattern pRel = Pattern.compile("(?i)(?:relacionar|relaciona|conectar|conecta)\\s+([a-zA-Z0-9_]+)\\s+con\\s+([a-zA-Z0-9_]+)(?:\\s+(?:de\\s+tipo\\s+)?(herencia|asociacion|agregacion|composicion|dependencia))?(?:\\s+(?:con\\s+)?(?:multiplicidad|cardinalidad)?\\s*(1\\s*a\\s*n|n\\s*a\\s*m|1\\s*a\\s*1|uno\\s*a\\s*muchos|muchos\\s*a\\s*muchos|(?:0\\.\\.\\*|1\\.\\.\\*|0\\.\\.1|1|\\*)\\s*a\\s*(?:0\\.\\.\\*|1\\.\\.\\*|0\\.\\.1|1|\\*)))?");
         Matcher mRel = pRel.matcher(raw);
         if (mRel.find()) {
           String origenName = mRel.group(1).trim();
@@ -230,7 +344,11 @@ public class AiAssistantService {
             String multOrigen = "1";
             String multDestino = "*";
             if (cardStr != null) {
-              if (cardStr.contains("n a m") || cardStr.contains("muchos a muchos")) {
+              String[] exactMultiplicities = cardStr.split("\\s+a\\s+");
+              if (exactMultiplicities.length == 2 && exactMultiplicities[0].matches("(?:0\\.\\.\\*|1\\.\\.\\*|0\\.\\.1|1|\\*)")) {
+                multOrigen = exactMultiplicities[0];
+                multDestino = exactMultiplicities[1];
+              } else if (cardStr.contains("n a m") || cardStr.contains("muchos a muchos")) {
                 multOrigen = "*";
                 multDestino = "*";
               } else if (cardStr.contains("1 a 1") || cardStr.contains("uno a uno")) {
@@ -250,12 +368,94 @@ public class AiAssistantService {
             );
             umlService.saveRelation(projectId, diagramId, email, relDto);
 
-            actionType = "RELACION_CREADA";
-            message = "Relación de tipo " + tipoRel + " (" + multOrigen + " .. " + multDestino + ") establecida entre «" + origenName + "» y «" + destinoName + "».";
+            actionType = "CREAR_RELACION";
+            message = "Relación " + tipoRel + " (" + multOrigen + " .. " + multDestino + ") establecida entre «" + origenName + "» y «" + destinoName + "».";
             success = true;
           } else {
-            message = "No se pudieron encontrar ambas clases para conectar («" + origenName + "» y «" + destinoName + "»).";
+            message = "No se pudieron encontrar ambas clases («" + origenName + "» y «" + destinoName + "»).";
           }
+        }
+
+      } else if (normalized.matches(".*(uno a muchos|1 a n|muchos a muchos|n a m|uno a uno|1 a 1).*")) {
+        // 6. ESTABLECER MULTIPLICIDAD CONTEXTUAL: "Uno a muchos", "1 a N", "Muchos a muchos"
+        List<RelacionUML> relList = relationRepo.findByDiagramaId(diagramId);
+        RelacionUML targetRel = null;
+        if (request.selectedRelationId() != null && !request.selectedRelationId().isBlank()) {
+          try {
+            UUID relId = UUID.fromString(request.selectedRelationId());
+            targetRel = relList.stream().filter(r -> r.getId().equals(relId)).findFirst().orElse(null);
+          } catch (Exception ignored) {}
+        }
+        if (targetRel == null && !relList.isEmpty()) {
+          targetRel = relList.get(relList.size() - 1);
+        }
+
+        if (targetRel != null) {
+          String multOrig = "1";
+          String multDest = "*";
+          if (normalized.contains("muchos a muchos") || normalized.contains("n a m")) {
+            multOrig = "*";
+            multDest = "*";
+          } else if (normalized.contains("uno a uno") || normalized.contains("1 a 1")) {
+            multOrig = "1";
+            multDest = "1";
+          }
+
+          SaveRelation updateRel = new SaveRelation(
+              targetRel.getId(),
+              targetRel.getElementoOrigen().getId(),
+              targetRel.getElementoDestino().getId(),
+              targetRel.getNombreRelacion(),
+              targetRel.getTipoRelacion(),
+              multOrig,
+              multDest
+          );
+          umlService.saveRelation(projectId, diagramId, email, updateRel);
+
+          actionType = "ESTABLECER_MULTIPLICIDAD";
+          message = "Multiplicidad de la relación actualizada a (" + multOrig + " .. " + multDest + ").";
+          success = true;
+        } else {
+          message = "No hay relaciones en el diagrama para asignar multiplicidad.";
+        }
+
+      } else if (normalized.matches(".*(cambia|cambiar|tipo)\\s+.*(composicion|agregacion|herencia|asociacion|dependencia).*")) {
+        // 7. EDITAR TIPO DE RELACIÓN CONTEXTUAL: "Cambia esa relación a composición"
+        List<RelacionUML> relList = relationRepo.findByDiagramaId(diagramId);
+        RelacionUML targetRel = null;
+        if (request.selectedRelationId() != null && !request.selectedRelationId().isBlank()) {
+          try {
+            UUID relId = UUID.fromString(request.selectedRelationId());
+            targetRel = relList.stream().filter(r -> r.getId().equals(relId)).findFirst().orElse(null);
+          } catch (Exception ignored) {}
+        }
+        if (targetRel == null && !relList.isEmpty()) {
+          targetRel = relList.get(relList.size() - 1);
+        }
+
+        if (targetRel != null) {
+          TipoRelacionUML nuevoTipo = TipoRelacionUML.ASOCIACION;
+          if (normalized.contains("composicion")) nuevoTipo = TipoRelacionUML.COMPOSICION;
+          else if (normalized.contains("agregacion")) nuevoTipo = TipoRelacionUML.AGREGACION;
+          else if (normalized.contains("herencia")) nuevoTipo = TipoRelacionUML.HERENCIA;
+          else if (normalized.contains("dependencia")) nuevoTipo = TipoRelacionUML.DEPENDENCIA;
+
+          SaveRelation updateRel = new SaveRelation(
+              targetRel.getId(),
+              targetRel.getElementoOrigen().getId(),
+              targetRel.getElementoDestino().getId(),
+              targetRel.getNombreRelacion(),
+              nuevoTipo,
+              targetRel.getMultiplicidadOrigen(),
+              targetRel.getMultiplicidadDestino()
+          );
+          umlService.saveRelation(projectId, diagramId, email, updateRel);
+
+          actionType = "EDITAR_RELACION";
+          message = "Tipo de relación cambiado exitosamente a «" + nuevoTipo + "».";
+          success = true;
+        } else {
+          message = "No se encontró ninguna relación para actualizar su tipo.";
         }
       }
 
@@ -263,11 +463,11 @@ public class AiAssistantService {
       message = "Error al procesar el comando: " + e.getMessage();
     }
 
-    // Registrar interacción de IA
     try {
       iaRepo.save(new InteraccionIa(diagram, user, "COMANDO_" + request.resolvedSource(), raw, message, actionType));
     } catch (Exception ignored) {}
 
+    wsHandler.broadcastDiagramChanged(diagramId, "COMMAND_EXECUTED");
     DiagramFullView updated = umlService.getDiagram(projectId, diagramId, email);
     return new CommandResponse(success, actionType, message, updated);
   }
@@ -304,11 +504,329 @@ public class AiAssistantService {
     return new ChatResponse(answer, suggestion);
   }
 
-  public ImageReconstructionResponse reconstructFromImage(
+  public ImageAnalysisResponse analyzeImage(UUID projectId, UUID diagramId, String email, AnalyzeImageRequest request) {
+    projectService.requireCanEdit(projectId, email);
+    validateDiagram(projectId, diagramId);
+    if (geminiModel == null || !geminiModel.matches("[A-Za-z0-9._-]{1,100}")) {
+      throw new BadRequestException("GEMINI_MODEL no tiene un identificador válido.");
+    }
+    String image = request.imageBase64();
+    if (image == null || image.length() > 14_000_000) throw new BadRequestException("La imagen está vacía o supera el máximo de 10 MB.");
+    String mimeType = "image/png";
+    String imageData = image;
+    if (image.startsWith("data:")) {
+      int separator = image.indexOf(',');
+      if (separator < 0) throw new BadRequestException("El formato de imagen enviado no es válido.");
+      String metadata = image.substring(5, separator);
+      if (!metadata.toLowerCase(Locale.ROOT).endsWith(";base64")) throw new BadRequestException("La imagen debe enviarse codificada en Base64.");
+      mimeType = metadata.substring(0, metadata.length() - 7).toLowerCase(Locale.ROOT);
+      imageData = image.substring(separator + 1);
+    }
+    if (!Set.of("image/png", "image/jpeg", "image/webp", "image/heic", "image/heif").contains(mimeType)) {
+      throw new BadRequestException("Formato no compatible. Usa PNG, JPG, WEBP, HEIC o HEIF.");
+    }
+    try {
+      if (Base64.getDecoder().decode(imageData).length > 10_000_000) throw new BadRequestException("La imagen supera el máximo de 10 MB.");
+    } catch (IllegalArgumentException exception) {
+      throw new BadRequestException("La imagen Base64 no es válida.");
+    }
+
+    String apiKeyToUse = geminiApiKey;
+    if (apiKeyToUse == null || apiKeyToUse.isBlank()) apiKeyToUse = System.getenv("GEMINI_API_KEY");
+    if (apiKeyToUse == null || apiKeyToUse.isBlank()) apiKeyToUse = System.getenv("GOOGLE_API_KEY");
+
+    if (apiKeyToUse == null || apiKeyToUse.isBlank()) {
+      throw new BadRequestException("GEMINI_API_KEY no está configurada en backend/.env. Configura la propiedad GEMINI_API_KEY en el archivo backend/.env para habilitar la reconstrucción con Gemini Vision.");
+    }
+
+    ImageModel model = analyzeWithGemini(imageData, mimeType, request.promptHint(), apiKeyToUse);
+    return new ImageAnalysisResponse(model, model.warnings(), "GEMINI");
+  }
+
+  private ImageAnalysisResponse analyzeWithLocalFallback(String imageBase64, String hint, String reason) {
+    List<DetectedClass> detectedClasses = new ArrayList<>();
+    List<DetectedRelation> detectedRelations = new ArrayList<>();
+    boolean recognized = tryNativeTesseract(imageBase64, detectedClasses, detectedRelations);
+    if (!recognized) recognized = tryOllamaVision(imageBase64, Objects.toString(hint, ""), detectedClasses, detectedRelations);
+    if (!recognized || detectedClasses.isEmpty()) {
+      throw new BadRequestException(reason + " Tampoco fue posible reconocer clases con el fallback local (Tesseract/Ollama). No se modificó el diagrama.");
+    }
+
+    List<String> warnings = new ArrayList<>();
+    warnings.add(reason + " Se utilizó el fallback local; revisa cuidadosamente nombres, tipos y relaciones antes de aplicar el modelo.");
+    List<ImageClass> classes = new ArrayList<>();
+    for (DetectedClass detected : detectedClasses) {
+      List<ImageAttribute> attributes = detected.attributes.stream()
+          .map(attribute -> new ImageAttribute(
+              Set.of("+", "-", "#", "~").contains(attribute.visibility) ? attribute.visibility : null,
+              attribute.name,
+              "?".equals(attribute.type) ? null : attribute.type,
+              0.56))
+          .toList();
+      List<ImageMethod> methods = detected.methods.stream()
+          .map(method -> new ImageMethod(
+              Set.of("+", "-", "#", "~").contains(method.visibility) ? method.visibility : null,
+              method.name,
+              "?".equals(method.returnType) ? null : method.returnType,
+              method.parameters,
+              0.56))
+          .toList();
+      classes.add(new ImageClass(detected.name, detected.tipo, 0.72, detected.posX, detected.posY, attributes, methods));
+    }
+    List<ImageRelation> relations = detectedRelations.stream()
+        .map(relation -> new ImageRelation(relation.source, relation.target, relation.name, relation.tipo,
+            relation.multSource, relation.multTarget, 0.70))
+        .toList();
+    if (!relations.isEmpty()) warnings.add("El fallback local estima las relaciones por texto y posición; confirma el tipo, dirección y multiplicidad visualmente.");
+    ImageModel model = UmlImageModelValidator.validateForApply(new ImageModel(classes, relations, warnings));
+    return new ImageAnalysisResponse(model, model.warnings(), "LOCAL");
+  }
+
+  public ImageReconstructionResponse applyImageModel(UUID projectId, UUID diagramId, String email, ApplyImageModelRequest request) {
+    projectService.requireCanEdit(projectId, email);
+    DiagramaClase diagram = validateDiagram(projectId, diagramId);
+    umlService.requireNotLocked(diagram, email);
+    User user = userRepo.findByEmailIgnoreCase(email)
+        .orElseThrow(() -> new NotFoundException("Usuario no encontrado."));
+    ImageModel model = UmlImageModelValidator.validateForApply(request.model());
+    if (request.mode() == null) throw new BadRequestException("Selecciona si deseas agregar o reemplazar el contenido.");
+
+    List<String> warnings = new ArrayList<>(model.warnings());
+    if (request.mode() == ImageImportMode.REPLACE) {
+      relationRepo.deleteByDiagramaId(diagramId);
+      relationRepo.flush();
+      elementRepo.deleteByDiagramaId(diagramId);
+      elementRepo.flush();
+    }
+
+    List<ElementoUML> existingElements = elementRepo.findByDiagramaId(diagramId);
+    Map<String, UUID> classIdByName = new HashMap<>();
+    for (ElementoUML existing : existingElements) classIdByName.putIfAbsent(existing.getNombre().toLowerCase(Locale.ROOT), existing.getId());
+    double maxX = existingElements.stream().mapToDouble(ElementoUML::getPosicionX).max().orElse(-360);
+    double offsetX = request.mode() == ImageImportMode.ADD && !existingElements.isEmpty() ? Math.min(maxX + 360, 4000) : 0;
+    int createdClasses = 0, createdRelations = 0, index = 0;
+
+    for (ImageClass detected : model.classes()) {
+      String key = detected.name().toLowerCase(Locale.ROOT);
+      if (classIdByName.containsKey(key)) {
+        warnings.add("No se duplicó «" + detected.name() + "» porque ya existe en el diagrama.");
+        continue;
+      }
+      ObjectNode properties = objectMapper.createObjectNode();
+      ArrayNode attributes = properties.putArray("attributes");
+      for (ImageAttribute attribute : detected.attributes()) {
+        attributes.addObject().put("id", UUID.randomUUID().toString()).put("visibility", attribute.visibility())
+            .put("name", attribute.name()).put("type", attribute.type());
+      }
+      ArrayNode methods = properties.putArray("methods");
+      for (ImageMethod method : detected.methods()) {
+        methods.addObject().put("id", UUID.randomUUID().toString()).put("visibility", method.visibility())
+            .put("name", method.name()).put("returnType", method.returnType()).put("parameters", method.parameters());
+      }
+      int col = index % 3, row = index / 3;
+      double x = detected.x() != null ? detected.x() + offsetX : offsetX + 120 + col * 340.0;
+      double y = detected.y() != null ? detected.y() : 90 + row * 260.0;
+      UmlResponses.ElementDetail saved = umlService.saveElement(projectId, diagramId, email,
+          new SaveElement(null, detected.type(), detected.name(), x, y, properties.toString()));
+      classIdByName.put(key, saved.id());
+      createdClasses++; index++;
+    }
+
+    Set<String> existingRelationKeys = new HashSet<>();
+    for (RelacionUML existing : relationRepo.findByDiagramaId(diagramId)) {
+      existingRelationKeys.add(relationKey(existing.getElementoOrigen().getId(), existing.getElementoDestino().getId(), existing.getTipoRelacion()));
+    }
+    for (ImageRelation relation : model.relations()) {
+      UUID sourceId = classIdByName.get(relation.source().toLowerCase(Locale.ROOT));
+      UUID targetId = classIdByName.get(relation.target().toLowerCase(Locale.ROOT));
+      if (sourceId == null || targetId == null) {
+        warnings.add("No se creó la relación «" + relation.source() + " → " + relation.target() + "» porque falta un elemento en el diagrama.");
+        continue;
+      }
+      String key = relationKey(sourceId, targetId, relation.type());
+      if (!existingRelationKeys.add(key)) { warnings.add("No se duplicó la relación «" + relation.source() + " → " + relation.target() + "."); continue; }
+      umlService.saveRelation(projectId, diagramId, email, new SaveRelation(null, sourceId, targetId, relation.name(), relation.type(), relation.multiplicitySource(), relation.multiplicityTarget()));
+      createdRelations++;
+    }
+
+    if (createdClasses == 0 && createdRelations == 0 && request.mode() == ImageImportMode.ADD) {
+      warnings.add("No se agregaron elementos nuevos; el contenido existente se conservó.");
+      return new ImageReconstructionResponse(false, "No había elementos nuevos para agregar.", 0, 0, umlService.getDiagram(projectId, diagramId, email), List.copyOf(warnings));
+    }
+    wsHandler.broadcastDiagramChanged(diagramId, request.mode() == ImageImportMode.REPLACE ? "IMAGE_MODEL_REPLACED" : "IMAGE_MODEL_ADDED");
+    String message = "Se procesaron " + createdClasses + " elementos y " + createdRelations + " relaciones desde la imagen.";
+    iaRepo.save(new InteraccionIa(diagram, user, "RECONSTRUCCION_IMAGEN", "Imagen: " + Objects.toString(request.filename(), "diagrama"), message, null));
+    return new ImageReconstructionResponse(true, message, createdClasses, createdRelations, umlService.getDiagram(projectId, diagramId, email), List.copyOf(warnings));
+  }
+
+  private static String relationKey(UUID source, UUID target, TipoRelacionUML type) {
+    if (type == TipoRelacionUML.ASOCIACION && source.compareTo(target) > 0) {
+      UUID swap = source;
+      source = target;
+      target = swap;
+    }
+    return source + "|" + target + "|" + type;
+  }
+
+  private ImageModel analyzeWithGemini(String imageBase64, String mimeType, String hint, String apiKeyToUse) {
+    List<String> modelsToTry = new ArrayList<>();
+    if (geminiModel != null && !geminiModel.isBlank()) modelsToTry.add(geminiModel.trim());
+    for (String m : List.of("gemini-3.8-flash", "gemini-flash-latest")) {
+      if (!modelsToTry.contains(m)) modelsToTry.add(m);
+    }
+
+    java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(20)).build();
+    String lastError = null;
+
+    for (String targetModel : modelsToTry) {
+      // Intentar Análisis en 2 Etapas (Paso 1: Elementos, Paso 2: Conexiones)
+      try {
+        String stage1Prompt = """
+            ETAPA 1: Extrae únicamente las CLASES, INTERFACES, CLASES ABSTRACTAS y ENUMERACIONES visibles en la imagen.
+            No inventes nada nuevo ni completes el modelo. La imagen es la fuente de verdad.
+            Para cada elemento extrae:
+            - "name": nombre exacto tal como aparece impreso.
+            - "type": "CLASE" | "INTERFAZ" | "CLASE_ABSTRACTA" | "ENUMERACION".
+            - "confidence": número 0.5..1.0.
+            - "x": coordenada X estimada en lienzo (80 a 2400).
+            - "y": coordenada Y estimada en lienzo (60 a 1600).
+            - "attributes": arreglo de atributos [{ "name": "...", "type": "...", "visibility": "+"|"-"|"#"|"~", "confidence": 0.9 }].
+            - "methods": arreglo de métodos [{ "name": "...", "returnType": "...", "parameters": "...", "visibility": "+"|"-"|"#"|"~", "confidence": 0.9 }].
+            Devuelve ÚNICAMENTE un objeto JSON con la clave raíz "classes": [...]
+            """ + (hint == null || hint.isBlank() ? "" : "\nPista de dominio: " + hint.trim());
+
+        String stage1Text = callGeminiRaw(client, targetModel, apiKeyToUse, imageBase64, mimeType, stage1Prompt);
+        if (stage1Text != null && !stage1Text.isBlank()) {
+          JsonNode stage1Json = parseGeminiJsonNode(stage1Text);
+          JsonNode classesNode = stage1Json.path("classes");
+
+          if (classesNode.isArray() && classesNode.size() > 0) {
+            List<String> classNames = new ArrayList<>();
+            for (JsonNode c : classesNode) {
+              String cn = c.path("name").asText("").trim();
+              if (!cn.isBlank()) classNames.add(cn);
+            }
+
+            String stage2Prompt = """
+                ETAPA 2: Analiza minuciosamente TODAS las relaciones y conexiones en el diagrama de la imagen.
+                Las clases identificadas en la imagen son: """ + classNames + """
+
+                Instrucción crítica: Inspecciona TODOS los 4 lados de CADA caja de clase en busca de líneas conectoras (asociaciones, herencias, agregaciones, composiciones, dependencias).
+                Ten en cuenta que una sola clase (por ejemplo, Pago) puede tener MÚLTIPLES líneas de relación independientes hacia distintas clases (por ejemplo, Pago -> MetodoPago Y ADEMÁS Pago -> PasarelaPago). NO te detengas al encontrar 1 relación.
+                Para CADA línea conectora visible, extrae:
+                - "source": clase origen en el extremo inicial.
+                - "target": clase destino en el extremo final (en herencia, la punta triangular hueca apunta al destino padre).
+                - "type": "ASOCIACION" | "HERENCIA" | "AGREGACION" | "COMPOSICION" | "DEPENDENCIA".
+                - "name": nombre de la relación si existe impreso (ej. "realiza", "tiene", "procesa"), o null.
+                - "multiplicitySource": multiplicidad exacta junto al origen (ej. "1", "*", "0..1", "1..*", "0..*") o null.
+                - "multiplicityTarget": multiplicidad exacta junto al destino (ej. "1", "*", "0..1", "1..*", "0..*") o null.
+                - "confidence": número 0.5..1.0.
+                Devuelve ÚNICAMENTE un objeto JSON con la clave raíz "relations": [...]
+                """;
+
+            String stage2Text = callGeminiRaw(client, targetModel, apiKeyToUse, imageBase64, mimeType, stage2Prompt);
+            JsonNode relationsNode = null;
+            if (stage2Text != null && !stage2Text.isBlank()) {
+              JsonNode stage2Json = parseGeminiJsonNode(stage2Text);
+              relationsNode = stage2Json.path("relations");
+            }
+
+            ObjectNode mergedRoot = objectMapper.createObjectNode();
+            mergedRoot.set("classes", classesNode);
+            mergedRoot.set("relations", relationsNode != null && relationsNode.isArray() ? relationsNode : objectMapper.createArrayNode());
+            mergedRoot.set("warnings", objectMapper.createArrayNode());
+
+            ImageModel model = UmlImageModelValidator.parseAndValidate(mergedRoot.toString());
+            if (model != null && !model.classes().isEmpty()) {
+              log.info("Gemini Vision 2-Etapas [{}] reconoció {} clases y {} relaciones.", targetModel, model.classes().size(), model.relations().size());
+              return model;
+            }
+          }
+        }
+      } catch (Exception e) {
+        log.warn("El análisis 2-etapas en Gemini [{}] no concluyó, intentando análisis unificado: {}", targetModel, e.getMessage());
+        lastError = e.getMessage();
+      }
+
+      // Reintento con Prompt Unificado Completo
+      try {
+        String unifiedPrompt = """
+            Perform an exhaustive 2-step analysis of this UML class diagram image:
+            Step 1: Extract all visible classes, interfaces, abstract classes, and enumerations, with their exact attributes, types, visibilities, and methods.
+            Step 2: Inspect EVERY class boundary for ALL outgoing or incoming connector lines, arrows, diamonds, or associations. A single class (e.g. Pago) can connect to multiple separate classes (e.g. Pago -> MetodoPago AND Pago -> PasarelaPago). Inspect all 4 sides of every class box.
+            Return ONLY one JSON object with exactly these root keys: classes, relations, warnings.
+            Each class: name, type (CLASE|INTERFAZ|CLASE_ABSTRACTA|ENUMERACION), confidence (0..1), x and y (canvas coordinates x 80..2400, y 80..1600), attributes (array), methods (array).
+            Each attribute: name, type, visibility (+|-|#|~), confidence (0..1). Each method: name, returnType, parameters, visibility (+|-|#|~), confidence (0..1).
+            Each relation: source, target, type (ASOCIACION|HERENCIA|AGREGACION|COMPOSICION|DEPENDENCIA), name, multiplicitySource and multiplicityTarget (exact UML multiplicity like "1", "*", "0..1", "1..*"), confidence (0..1).
+            Keep Spanish identifiers exactly as printed. Do not output markdown code fences.
+            """ + (hint == null || hint.isBlank() ? "" : "\nDomain hint: " + hint.trim());
+
+        String text = callGeminiRaw(client, targetModel, apiKeyToUse, imageBase64, mimeType, unifiedPrompt);
+        if (text != null && !text.isBlank()) {
+          ImageModel model = UmlImageModelValidator.parseAndValidate(text);
+          if (model != null && !model.classes().isEmpty()) {
+            return model;
+          }
+        }
+      } catch (Exception e) {
+        log.warn("Gemini Vision unificado [{}] falló: {}", targetModel, e.getMessage());
+        lastError = e.getMessage();
+      }
+    }
+
+    if (lastError != null && !lastError.isBlank()) {
+      throw new BadRequestException("Error en respuesta de Gemini Vision: " + lastError);
+    }
+    throw new BadRequestException("Gemini no pudo reconocer clases en la imagen. Asegúrate de que el diagrama sea legible.");
+  }
+
+  private String callGeminiRaw(java.net.http.HttpClient client, String model, String apiKey, String imageBase64, String mimeType, String prompt) throws Exception {
+    ObjectNode root = objectMapper.createObjectNode();
+    ArrayNode content = root.putArray("contents").addObject().putArray("parts");
+    content.addObject().put("text", prompt);
+    content.addObject().putObject("inline_data").put("mime_type", mimeType).put("data", imageBase64);
+    root.putObject("generationConfig").put("response_mime_type", "application/json");
+
+    java.net.URI uri = java.net.URI.create("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent");
+    java.net.http.HttpRequest httpRequest = java.net.http.HttpRequest.newBuilder(uri)
+        .header("Content-Type", "application/json")
+        .header("x-goog-api-key", apiKey.trim())
+        .timeout(java.time.Duration.ofSeconds(45))
+        .POST(java.net.http.HttpRequest.BodyPublishers.ofString(root.toString()))
+        .build();
+
+    java.net.http.HttpResponse<String> response = client.send(httpRequest, java.net.http.HttpResponse.BodyHandlers.ofString());
+    if (response.statusCode() == 200) {
+      JsonNode responseJson = objectMapper.readTree(response.body());
+      return responseJson.path("candidates").path(0).path("content").path("parts").path(0).path("text").asText("");
+    } else {
+      String err = "HTTP " + response.statusCode() + ": " + response.body();
+      log.warn("Gemini Vision [{}] respondió error {}", model, err);
+      throw new IOException("Modelo " + model + " respondió " + err);
+    }
+  }
+
+  private JsonNode parseGeminiJsonNode(String text) {
+    try {
+      String clean = text.trim();
+      if (clean.contains("```")) {
+        int start = clean.indexOf('{');
+        int end = clean.lastIndexOf('}');
+        if (start >= 0 && end > start) {
+          clean = clean.substring(start, end + 1);
+        }
+      }
+      return objectMapper.readTree(clean);
+    } catch (Exception e) {
+      return objectMapper.createObjectNode();
+    }
+  }
+
+  private ImageReconstructionResponse reconstructFromImageLegacy(
       UUID projectId,
       UUID diagramId,
       String email,
-      ReconstructImageRequest request
+      AiRequests.LegacyReconstructImageRequest request
   ) {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = validateDiagram(projectId, diagramId);
@@ -322,30 +840,28 @@ public class AiAssistantService {
     List<DetectedRelation> detectedRelations = new ArrayList<>();
 
     // 1. Si el usuario proporcionó clave de Google Gemini, priorizar visión multimodal de IA en el backend
-    String geminiKey = request.geminiApiKey() != null && !request.geminiApiKey().isBlank()
-        ? request.geminiApiKey().trim()
-        : System.getenv("GEMINI_API_KEY");
+    String geminiKey = geminiApiKey;
     if (geminiKey != null && !geminiKey.isBlank()) {
       log.info("Iniciando análisis multimodal con Google Gemini Vision en backend...");
-      tryGeminiVision(request.imageBase64(), geminiKey, detectedClasses, detectedRelations);
+      tryGeminiVision(request.imageBase64(), geminiKey, hint, detectedClasses, detectedRelations);
     }
 
     // 2. Si no se usó Gemini o no detectó clases, usar lo detectado por el cliente
     if (detectedClasses.isEmpty() && request.clientDetectedClasses() != null && !request.clientDetectedClasses().isEmpty()) {
-      for (AiRequests.ClientDetectedClass cdc : request.clientDetectedClasses()) {
+      for (AiRequests.LegacyDetectedClass cdc : request.clientDetectedClasses()) {
         if (cdc.name() == null || cdc.name().isBlank()) continue;
         DetectedClass dc = new DetectedClass(cdc.name().trim());
         if (cdc.posX() != null) dc.posX = cdc.posX();
         if (cdc.posY() != null) dc.posY = cdc.posY();
         if (cdc.attributes() != null) {
-          for (AiRequests.ClientDetectedAttr cda : cdc.attributes()) {
+          for (AiRequests.LegacyDetectedAttr cda : cdc.attributes()) {
             if (cda.name() != null && !cda.name().isBlank()) {
               dc.attributes.add(new DetectedAttr(cda.visibility(), cda.name().trim(), cda.type() != null ? cda.type().trim() : "String"));
             }
           }
         }
         if (cdc.methods() != null) {
-          for (AiRequests.ClientDetectedMethod cdm : cdc.methods()) {
+          for (AiRequests.LegacyDetectedMethod cdm : cdc.methods()) {
             if (cdm.name() != null && !cdm.name().isBlank()) {
               dc.methods.add(new DetectedMethod(cdm.visibility(), cdm.name().trim(), cdm.returnType() != null ? cdm.returnType().trim() : "void"));
             }
@@ -354,7 +870,7 @@ public class AiAssistantService {
         detectedClasses.add(dc);
       }
       if (request.clientDetectedRelations() != null) {
-        for (AiRequests.ClientDetectedRelation cdr : request.clientDetectedRelations()) {
+        for (AiRequests.LegacyDetectedRelation cdr : request.clientDetectedRelations()) {
           if (cdr.source() != null && cdr.target() != null && !cdr.source().isBlank() && !cdr.target().isBlank()) {
             TipoRelacionUML tipoRel = TipoRelacionUML.ASOCIACION;
             if (cdr.tipo() != null) {
@@ -462,7 +978,8 @@ public class AiAssistantService {
             .put("id", UUID.randomUUID().toString())
             .put("visibility", m.visibility != null ? m.visibility : "+")
             .put("name", cleanMethodName)
-            .put("returnType", capitalizeType(m.returnType));
+            .put("returnType", capitalizeType(m.returnType))
+            .put("parameters", m.parameters);
       }
 
       double posX = dc.posX != null ? dc.posX : baseX + (col * 320.0);
@@ -535,7 +1052,7 @@ public class AiAssistantService {
     return new ImageReconstructionResponse(true, message, detectedClasses.size(), relsCreated, updatedDiagram);
   }
 
-  private boolean tryGeminiVision(String base64Image, String apiKey, List<DetectedClass> outClasses, List<DetectedRelation> outRelations) {
+  private boolean tryGeminiVision(String base64Image, String apiKey, String hint, List<DetectedClass> outClasses, List<DetectedRelation> outRelations) {
     if (apiKey == null || apiKey.isBlank()) return false;
     try {
       String cleanBase64 = base64Image.contains(",")
@@ -544,12 +1061,14 @@ public class AiAssistantService {
 
       String mimeType = base64Image.startsWith("data:image/png") ? "image/png" : "image/jpeg";
 
-      String prompt = "You are an expert UML Reverse Engineering system. Analyze this UML diagram image in detail.\n" +
-          "Extract EVERY class shown and ONLY the relationships that have an EXPLICIT connecting line drawn between the two classes.\n" +
-          "Do NOT invent, assume or add any relationships between classes that do not have an explicit connecting line!\n" +
+      String prompt = "You are an expert UML Reverse Engineering system. Perform a 2-stage visual analysis of this UML diagram image in detail.\n" +
+          "Stage 1: Extract EVERY class, interface, abstract class and enumeration with its name, attributes, and methods.\n" +
+          "Stage 2: Inspect all 4 sides of EVERY class box for ALL outgoing or incoming connector lines (associations, inheritances, aggregations, compositions, dependencies).\n" +
+          "Note that a class (e.g. Pago) may connect to multiple distinct classes (e.g. MetodoPago and PasarelaPago). Do not omit any visible relationship line.\n" +
           "For each class: name, attributes (visibility: '-'|'+'|'#', name, type), methods (visibility, name, returnType), estimated posX (left=100, center=480, right=860) and posY (top=80, bottom=420).\n" +
-          "For each relationship: source, target, name (e.g. 'realiza', 'tiene', 'corresponde a'), tipo ('ASOCIACION'), multSource, multTarget.\n" +
-          "Return ONLY valid JSON matching this format: {\"classes\": [...], \"relations\": [...]}";
+          "For each relationship: source, target, name (e.g. 'realiza', 'tiene', 'corresponde a'), tipo ('ASOCIACION'|'HERENCIA'|'AGREGACION'|'COMPOSICION'|'DEPENDENCIA'), multSource, multTarget.\n" +
+          "Return ONLY valid JSON matching this format: {\"classes\": [...], \"relations\": [...]}" +
+          (hint == null || hint.isBlank() ? "" : "\nDomain context supplied by the user (use only to disambiguate labels; do not invent classes or links): " + hint.trim());
 
       ObjectNode rootNode = objectMapper.createObjectNode();
       ArrayNode contents = rootNode.putArray("contents");
@@ -564,15 +1083,16 @@ public class AiAssistantService {
       ObjectNode genConfig = rootNode.putObject("generationConfig");
       genConfig.put("response_mime_type", "application/json");
 
-      String[] models = {"gemini-2.0-flash", "gemini-1.5-flash"};
+      String[] models = {"gemini-3.8-flash", "gemini-flash-latest"};
       java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
           .connectTimeout(java.time.Duration.ofSeconds(12))
           .build();
 
       for (String model : models) {
-        java.net.URI uri = java.net.URI.create("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + apiKey.trim());
+        java.net.URI uri = java.net.URI.create("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent");
         java.net.http.HttpRequest httpReq = java.net.http.HttpRequest.newBuilder(uri)
             .header("Content-Type", "application/json")
+            .header("x-goog-api-key", apiKey.trim())
             .timeout(java.time.Duration.ofSeconds(25))
             .POST(java.net.http.HttpRequest.BodyPublishers.ofString(rootNode.toString()))
             .build();
@@ -616,9 +1136,9 @@ public class AiAssistantService {
             String aName = aNode.path("name").asText("").trim();
             if (!aName.isBlank()) {
               dc.attributes.add(new DetectedAttr(
-                  aNode.path("visibility").asText("-"),
+                  aNode.path("visibility").asText("~"),
                   aName,
-                  aNode.path("type").asText("String")
+                  aNode.path("type").asText("?")
               ));
             }
           }
@@ -628,9 +1148,9 @@ public class AiAssistantService {
             String mName = mNode.path("name").asText("").trim();
             if (!mName.isBlank()) {
               dc.methods.add(new DetectedMethod(
-                  mNode.path("visibility").asText("+"),
+                  mNode.path("visibility").asText("~"),
                   mName,
-                  mNode.path("returnType").asText("void")
+                  mNode.path("returnType").asText("?")
               ));
             }
           }
@@ -660,8 +1180,8 @@ public class AiAssistantService {
               tgt,
               rNode.path("name").asText(null),
               tipoRel,
-              rNode.path("multSource").asText("1"),
-              rNode.path("multTarget").asText("*")
+              rNode.path("multSource").isMissingNode() || rNode.path("multSource").isNull() ? null : rNode.path("multSource").asText(),
+              rNode.path("multTarget").isMissingNode() || rNode.path("multTarget").isNull() ? null : rNode.path("multTarget").asText()
           ));
         }
       }
@@ -752,10 +1272,15 @@ public class AiAssistantService {
     String visibility = "+";
     String name;
     String returnType = "void";
+    String parameters = "";
     DetectedMethod(String visibility, String name, String returnType) {
       this.visibility = visibility != null && !visibility.isBlank() ? visibility : "+";
       this.name = name;
       this.returnType = returnType != null && !returnType.isBlank() ? returnType : "void";
+    }
+    DetectedMethod(String visibility, String name, String returnType, String parameters) {
+      this(visibility, name, returnType);
+      this.parameters = parameters != null ? parameters : "";
     }
     DetectedMethod(String name, String returnType) { this("+", name, returnType); }
   }
@@ -772,8 +1297,8 @@ public class AiAssistantService {
       this.target = target;
       this.name = name;
       this.tipo = tipo != null ? tipo : TipoRelacionUML.ASOCIACION;
-      this.multSource = multSource != null && !multSource.isBlank() ? multSource : "1";
-      this.multTarget = multTarget != null && !multTarget.isBlank() ? multTarget : "*";
+      this.multSource = multSource != null && !multSource.isBlank() ? multSource : null;
+      this.multTarget = multTarget != null && !multTarget.isBlank() ? multTarget : null;
     }
     DetectedRelation(String source, String target, TipoRelacionUML tipo, String multSource, String multTarget) {
       this(source, target, null, tipo, multSource, multTarget);
@@ -793,7 +1318,7 @@ public class AiAssistantService {
         fos.write(imgBytes);
       }
 
-      ProcessBuilder pb = new ProcessBuilder("tesseract", tmpFile.getAbsolutePath(), "stdout", "--psm", "11", "tsv");
+      ProcessBuilder pb = new ProcessBuilder("tesseract", tmpFile.getAbsolutePath(), "stdout", "-l", "spa+eng", "--psm", "11", "tsv");
       pb.redirectErrorStream(true);
       Process process = pb.start();
 
@@ -913,37 +1438,46 @@ public class AiAssistantService {
             closest.maxY = Math.max(closest.maxY, ol.top + ol.height);
 
             if (isMethod) {
-              String vis = "+";
+              String vis = "~";
               String raw = t;
               if (raw.startsWith("-") || raw.startsWith("+") || raw.startsWith("#")) {
                 vis = raw.substring(0, 1);
                 raw = raw.substring(1).trim();
               }
               String mName = raw;
-              String mReturn = "void";
-              int colonIdx = raw.indexOf(":");
-              if (colonIdx > 0) {
-                mReturn = capitalizeType(raw.substring(colonIdx + 1).trim());
-                mName = raw.substring(0, colonIdx).trim();
+              String mReturn = "?";
+              String parameters = "";
+              int openParen = raw.indexOf('('), closeParen = raw.lastIndexOf(')');
+              if (openParen >= 0 && closeParen > openParen) {
+                mName = raw.substring(0, openParen).trim();
+                parameters = raw.substring(openParen + 1, closeParen).trim();
+                String tail = raw.substring(closeParen + 1).trim();
+                if (tail.startsWith(":")) mReturn = tail.substring(1).trim();
+              } else {
+                int colonIdx = raw.indexOf(":");
+                if (colonIdx > 0) {
+                  mReturn = raw.substring(colonIdx + 1).trim();
+                  mName = raw.substring(0, colonIdx).trim();
+                }
               }
-              mName = mName.replaceAll("[^a-zA-Z0-9_]", "").trim();
+              mName = mName.replaceAll("[^\\p{L}\\p{N}_]", "").trim();
               if (mName.isEmpty()) mName = "metodo";
-              closest.methods.add(new DetectedMethod(vis, mName, mReturn));
+              closest.methods.add(new DetectedMethod(vis, mName, mReturn, parameters));
             } else {
-              String vis = "-";
+              String vis = "~";
               String raw = t;
               if (raw.startsWith("-") || raw.startsWith("+") || raw.startsWith("#")) {
                 vis = raw.substring(0, 1);
                 raw = raw.substring(1).trim();
               }
               String aName = raw;
-              String aType = "String";
+              String aType = "?";
               int colonIdx = raw.indexOf(":");
               if (colonIdx > 0) {
                 aName = raw.substring(0, colonIdx).trim();
                 aType = capitalizeType(raw.substring(colonIdx + 1).trim());
               }
-              aName = aName.replaceAll("[^a-zA-Z0-9_]", "").trim();
+              aName = aName.replaceAll("[^\\p{L}\\p{N}_]", "").trim();
               if (aName.equalsIgnoreCase("fechalnicio")) aName = "fechaInicio";
               if (!aName.isEmpty()) {
                 closest.attributes.add(new DetectedAttr(vis, aName, aType));
@@ -1175,6 +1709,226 @@ public class AiAssistantService {
       throw new NotFoundException("El diagrama no pertenece a este proyecto.");
     }
     return diagram;
+  }
+
+  /** Interpreta lenguaje natural de CU10; el parser existente sigue ejecutando UML. */
+  private List<String> interpretCommandWithGemini(UUID diagramId, String userText) {
+    if (geminiApiKey == null || geminiApiKey.isBlank() || userText == null || userText.isBlank()) return null;
+    try {
+      String context = buildCommandContext(diagramId);
+      String prompt = """
+          Eres el intérprete de lenguaje natural de un editor UML. No ejecutes operaciones y no devuelvas explicaciones.
+          Devuelve únicamente JSON válido con esta forma: {"operaciones":[{...}]}.
+          Cada operación debe usar una acción permitida: CREAR_CLASE, AGREGAR_ATRIBUTOS, EDITAR_ELEMENTO,
+          CREAR_RELACION, ESTABLECER_MULTIPLICIDAD, CAMBIAR_TIPO_RELACION, CREAR_CLASE_INTERMEDIA,
+          CREAR_GENERALIZACION, CREAR_COMPOSICION, CREAR_AGREGACION o ELIMINAR_ELEMENTO.
+          Campos admitidos: accion, clase, nombre, nuevoNombre, atributos (arreglo de {nombre,tipo}),
+          origen, destino, tipoRelacion, multiplicidadOrigen, multiplicidadDestino,
+          claseIntermedia. Usa nombres exactos del usuario o del contexto.
+          Para relaciones sin multiplicidad explícita deja ambas multiplicidades como null.
+          Normaliza equivalencias naturales: hereda/deriva/generaliza a GENERALIZACION;
+          compuesto/forma parte a COMPOSICION; agrupa/pertenece a AGREGACION.
+          Si la intención no es una operación UML permitida, devuelve {"operaciones":[]}.
+
+          CONTEXTO DEL DIAGRAMA:
+          """ + context + "\n\nUSUARIO: " + userText.trim();
+
+      String response = callGeminiText(prompt, geminiApiKey.trim());
+      JsonNode root = parseGeminiJsonNode(response);
+      JsonNode operations = root.path("operaciones");
+      if (!operations.isArray() || operations.isEmpty()) {
+        operations = root.has("accion") ? objectMapper.createArrayNode().add(root) : operations;
+      }
+      List<String> commands = new ArrayList<>();
+      if (operations.isArray()) {
+        for (JsonNode operation : operations) {
+          String command = structuredActionToCommand(operation);
+          if (command != null && !command.isBlank()) commands.add(command);
+        }
+      }
+      return commands.isEmpty() ? null : commands;
+    } catch (Exception e) {
+      log.warn("No se pudo interpretar el comando CU10 con Gemini; se usará el parser local: {}", e.getMessage());
+      return null;
+    }
+  }
+
+  private String buildCommandContext(UUID diagramId) {
+    StringBuilder context = new StringBuilder();
+    context.append("CLASES:\n");
+    List<ElementoUML> elements = elementRepo.findByDiagramaId(diagramId);
+    if (elements != null) {
+      for (ElementoUML element : elements) {
+        context.append("- ").append(element.getNombre()).append(" (" ).append(element.getTipoElemento()).append(")");
+        context.append(" atributos=").append(element.getPropiedadesJson()).append("\n");
+      }
+    }
+    context.append("RELACIONES:\n");
+    List<RelacionUML> relations = relationRepo.findByDiagramaId(diagramId);
+    if (relations != null) {
+      for (RelacionUML relation : relations) {
+        context.append("- ").append(relation.getElementoOrigen().getNombre()).append(" -> ")
+            .append(relation.getElementoDestino().getNombre()).append(", ")
+            .append(relation.getTipoRelacion()).append(", ")
+            .append(relation.getMultiplicidadOrigen()).append(" a ")
+            .append(relation.getMultiplicidadDestino()).append("\n");
+      }
+    }
+    List<InteraccionIa> interactions = iaRepo.findByDiagramaIdOrderByFechaDesc(diagramId);
+    if (interactions != null && !interactions.isEmpty()) {
+      context.append("ÚLTIMAS OPERACIONES:\n");
+      interactions.stream().limit(5).forEach(i -> context.append("- ").append(i.getEntradaUsuario()).append(" => ")
+          .append(i.getAccionJson()).append("\n"));
+    }
+    return context.toString();
+  }
+
+  private String structuredActionToCommand(JsonNode operation) {
+    String action = operation.path("accion").asText(operation.path("action").asText(""))
+        .trim().toUpperCase(Locale.ROOT);
+    String clase = textField(operation, "clase", "class", "nombre");
+    String origen = textField(operation, "origen", "source");
+    String destino = textField(operation, "destino", "target");
+    String type = textField(operation, "tipoRelacion", "tipo", "relationType").toLowerCase(Locale.ROOT);
+    if (type.equals("generalizacion")) type = "herencia";
+    String multOrigen = normalizeMultiplicity(textField(operation, "multiplicidadOrigen", "multSource"));
+    String multDestino = normalizeMultiplicity(textField(operation, "multiplicidadDestino", "multTarget"));
+
+    return switch (action) {
+      case "CREAR_CLASE" -> clase.isBlank() ? null : "Crear clase " + clase;
+      case "AGREGAR_ATRIBUTOS" -> {
+        if (clase.isBlank() || !operation.path("atributos").isArray()) yield null;
+        List<String> attributes = new ArrayList<>();
+        for (JsonNode attribute : operation.path("atributos")) {
+          String name = textField(attribute, "nombre", "name");
+          String attrType = textField(attribute, "tipo", "type");
+          if (!name.isBlank()) attributes.add(name + (attrType.isBlank() ? "" : " " + attrType));
+        }
+        yield attributes.isEmpty() ? null : "Agregar " + String.join(", ", attributes) + " a " + clase;
+      }
+      case "EDITAR_ELEMENTO" -> {
+        String newName = textField(operation, "nuevoNombre", "newName");
+        yield clase.isBlank() || newName.isBlank() ? null : "Renombra la clase " + clase + " a " + newName;
+      }
+      case "CREAR_CLASE_INTERMEDIA" -> {
+        String middle = textField(operation, "claseIntermedia", "middleClass", "clase");
+        yield middle.isBlank() || origen.isBlank() || destino.isBlank() ? null
+            : "Crear clase intermedia " + middle + " entre " + origen + " y " + destino;
+      }
+      case "CREAR_GENERALIZACION" -> structuredRelationCommand("herencia", origen, destino, multOrigen, multDestino);
+      case "CREAR_COMPOSICION" -> structuredRelationCommand("composicion", origen, destino, multOrigen, multDestino);
+      case "CREAR_AGREGACION" -> structuredRelationCommand("agregacion", origen, destino, multOrigen, multDestino);
+      case "CREAR_RELACION" -> structuredRelationCommand(
+          type.isBlank() ? "asociacion" : type, origen, destino, multOrigen, multDestino);
+      case "CAMBIAR_TIPO_RELACION" -> type.isBlank() ? null : "Cambia esa relacion a " + type;
+      case "ESTABLECER_MULTIPLICIDAD" -> {
+        if (multOrigen == null && multDestino == null) yield null;
+        yield (multOrigen == null ? "1" : multOrigen) + " a " + (multDestino == null ? "*" : multDestino);
+      }
+      case "ELIMINAR_ELEMENTO" -> clase.isBlank() ? null : "Eliminar clase " + clase;
+      default -> null;
+    };
+  }
+
+  private String structuredRelationCommand(String type, String source, String target, String sourceMultiplicity, String targetMultiplicity) {
+    if (source.isBlank() || target.isBlank()) return null;
+    String command = "Relacionar " + source + " con " + target + " " + type;
+    if (sourceMultiplicity != null || targetMultiplicity != null) {
+      command += " " + (sourceMultiplicity == null ? "1" : sourceMultiplicity) + " a "
+          + (targetMultiplicity == null ? "*" : targetMultiplicity);
+    }
+    return command;
+  }
+
+  private String textField(JsonNode node, String... names) {
+    for (String name : names) {
+      String value = node.path(name).asText("").trim();
+      if (!value.isBlank()) return value;
+    }
+    return "";
+  }
+
+  private String normalizeMultiplicity(String value) {
+    if (value == null || value.isBlank() || value.equalsIgnoreCase("null")) return null;
+    String normalized = value.trim().toLowerCase(Locale.ROOT);
+    return switch (normalized) {
+      case "uno", "un", "one" -> "1";
+      case "muchos", "varios", "many" -> "*";
+      case "uno a muchos", "1 a muchos", "uno con varios" -> "1..*";
+      case "cero a muchos", "0 a muchos" -> "0..*";
+      default -> value.trim();
+    };
+  }
+
+  private boolean looksLikeSqlDdl(String command) {
+    return command != null && command.trim().toLowerCase(Locale.ROOT).matches("(?s).*\\b(create|alter|drop)\\s+table\\b.*");
+  }
+
+  private String callGeminiText(String prompt, String apiKey) throws Exception {
+    ObjectNode root = objectMapper.createObjectNode();
+    root.putArray("contents").addObject().putArray("parts").addObject().put("text", prompt);
+    root.putObject("generationConfig").put("response_mime_type", "application/json");
+    java.net.URI uri = java.net.URI.create("https://generativelanguage.googleapis.com/v1beta/models/"
+        + geminiModel.trim() + ":generateContent");
+    java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder(uri)
+        .header("Content-Type", "application/json")
+        .header("x-goog-api-key", apiKey)
+        .timeout(java.time.Duration.ofSeconds(30))
+        .POST(java.net.http.HttpRequest.BodyPublishers.ofString(root.toString()))
+        .build();
+    java.net.http.HttpResponse<String> response = java.net.http.HttpClient.newHttpClient()
+        .send(request, java.net.http.HttpResponse.BodyHandlers.ofString());
+    if (response.statusCode() != 200) throw new IOException("Gemini HTTP " + response.statusCode());
+    return objectMapper.readTree(response.body()).path("candidates").path(0).path("content")
+        .path("parts").path(0).path("text").asText("");
+  }
+
+  /** Normaliza las formas habituales del dictado antes de aplicar el parser CU10. */
+  private String normalizeVoiceCommand(String command) {
+    String value = Normalizer.normalize(command, Normalizer.Form.NFD)
+        .replaceAll("\\p{M}", "")
+        .replaceAll("\\s+", " ")
+        .trim();
+
+    Matcher relationBetween = Pattern.compile(
+        "(?i)^crear\\s+(?:una?\\s+)?(asociacion|composicion|agregacion|generalizacion|herencia|dependencia)\\s+entre\\s+([a-zA-Z0-9_]+)(?:\\s+(0\\.\\.\\*|1\\.\\.\\*|0\\.\\.1|1|\\*))?\\s+(?:y|con)\\s+([a-zA-Z0-9_]+)(?:\\s+(0\\.\\.\\*|1\\.\\.\\*|0\\.\\.1|1|\\*))?$")
+        .matcher(value);
+    if (relationBetween.matches()) {
+      return relationCommand(relationBetween.group(1), relationBetween.group(2), relationBetween.group(3), relationBetween.group(4), relationBetween.group(5));
+    }
+
+    Matcher relationDirect = Pattern.compile(
+        "(?i)^crear\\s+(?:una?\\s+)?(asociacion|composicion|agregacion|generalizacion|herencia|dependencia)\\s+([a-zA-Z0-9_]+)(?:\\s+(0\\.\\.\\*|1\\.\\.\\*|0\\.\\.1|1|\\*))?\\s+(?:a|con|y)\\s+([a-zA-Z0-9_]+)(?:\\s+(0\\.\\*|0\\.\\.\\*|1\\.\\.\\*|0\\.\\.1|1|\\*))?$")
+        .matcher(value);
+    if (relationDirect.matches()) {
+      return relationCommand(relationDirect.group(1), relationDirect.group(2), relationDirect.group(3), relationDirect.group(4), relationDirect.group(5));
+    }
+
+    Matcher relationWords = Pattern.compile("(?i)^relacionar\\s+([a-zA-Z0-9_]+)\\s+(uno a muchos|muchos a muchos|uno a uno)\\s+con\\s+([a-zA-Z0-9_]+)$").matcher(value);
+    if (relationWords.matches()) {
+      return "Relacionar " + relationWords.group(1) + " con " + relationWords.group(3) + " " + relationWords.group(2);
+    }
+
+    Matcher hasMany = Pattern.compile("(?i)^([a-zA-Z0-9_]+)\\s+tiene\\s+muchos\\s+([a-zA-Z0-9_]+)$").matcher(value);
+    if (hasMany.matches()) return "Relacionar " + hasMany.group(1) + " con " + hasMany.group(2) + " 1 a n";
+
+    Matcher composed = Pattern.compile("(?i)^([a-zA-Z0-9_]+)\\s+(?:esta\\s+)?compuesto\\s+por\\s+([a-zA-Z0-9_]+)$").matcher(value);
+    if (composed.matches()) return "Relacionar " + composed.group(1) + " con " + composed.group(2) + " composicion";
+
+    Matcher inherits = Pattern.compile("(?i)^([a-zA-Z0-9_]+)\\s+hereda\\s+de\\s+([a-zA-Z0-9_]+)$").matcher(value);
+    if (inherits.matches()) return "Relacionar " + inherits.group(1) + " con " + inherits.group(2) + " herencia";
+
+    return value;
+  }
+
+  private String relationCommand(String type, String source, String sourceMultiplicity, String target, String targetMultiplicity) {
+    String normalizedType = type.equalsIgnoreCase("generalizacion") ? "herencia" : type;
+    if (sourceMultiplicity == null && targetMultiplicity == null) {
+      return "Relacionar " + source + " con " + target + " " + normalizedType;
+    }
+    return "Relacionar " + source + " con " + target + " " + normalizedType + " "
+        + (sourceMultiplicity == null ? "1" : sourceMultiplicity) + " a "
+        + (targetMultiplicity == null ? "*" : targetMultiplicity);
   }
 
   private static class MultToken {

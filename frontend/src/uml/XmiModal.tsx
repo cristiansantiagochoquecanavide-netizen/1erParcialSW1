@@ -1,5 +1,8 @@
 import { useState } from 'react'
 import { DiagramFullView } from './types'
+import { ExchangeIcon, LockIcon, CheckIcon, AlertIcon } from './icons'
+import { AiModalShell } from './AiModalShell'
+import './xmi-modal.css'
 
 type Props = {
   projectId: string
@@ -7,6 +10,8 @@ type Props = {
   diagramName: string
   token: string
   isReadOnly: boolean
+  isLocked?: boolean
+  lockUser?: string | null
   onClose: () => void
   onDiagramUpdated: (fullView: DiagramFullView) => void
   onError: (err: unknown) => void
@@ -18,11 +23,12 @@ export function XmiModal({
   diagramName,
   token,
   isReadOnly,
+  isLocked = false,
+  lockUser = null,
   onClose,
   onDiagramUpdated,
   onError
 }: Props) {
-  // Predeterminado en XMI / XML para interoperabilidad (CU13)
   const [activeFormat, setActiveFormat] = useState<'xmi' | 'json'>('xmi')
   const [importText, setImportText] = useState('')
   const [loading, setLoading] = useState(false)
@@ -30,15 +36,18 @@ export function XmiModal({
   const [selectedFileSize, setSelectedFileSize] = useState<string | null>(null)
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
-  // Descargar archivo XMI / XML con cardinalidades
+  // Descargar archivo XMI / XML con cardinalidades y bloqueo colaborativo
   async function handleExportXmi(ext: 'xmi' | 'xml' = 'xmi') {
     try {
       setLoading(true)
-      setStatusMessage(null)
+      setStatusMessage({ type: 'success', text: 'Iniciando exportación EA XMI y creando bloqueo colaborativo en backend...' })
       const res = await fetch(`/api/projects/${projectId}/diagrams/${diagramId}/xmi/export`, {
         headers: { Authorization: `Bearer ${token}` }
       })
-      if (!res.ok) throw new Error('Error al exportar archivo XMI.')
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}))
+        throw new Error(b.message || 'Error al exportar archivo XMI.')
+      }
       const blob = await res.blob()
       const url = window.URL.createObjectURL(blob)
       const a = document.createElement('a')
@@ -48,14 +57,17 @@ export function XmiModal({
       a.click()
       window.URL.revokeObjectURL(url)
       document.body.removeChild(a)
+      setStatusMessage({ type: 'success', text: '✅ Exportación completada exitosamente y bloqueo liberado.' })
     } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Error al exportar XMI'
+      setStatusMessage({ type: 'error', text: msg })
       onError(err)
     } finally {
       setLoading(false)
     }
   }
 
-  // Descargar backup JSON completo con cardinalidades y coordenadas
+  // Descargar backup JSON completo
   async function handleExportJson() {
     try {
       setLoading(true)
@@ -83,7 +95,7 @@ export function XmiModal({
   // Importar archivo
   async function handleImportSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (isReadOnly) return
+    if (isReadOnly || isLocked) return
 
     if (!importText.trim()) {
       setStatusMessage({
@@ -97,7 +109,7 @@ export function XmiModal({
 
     try {
       setLoading(true)
-      setStatusMessage(null)
+      setStatusMessage({ type: 'success', text: 'Procesando importación XMI en backend con bloqueo de concurrencia activo...' })
       const endpoint =
         activeFormat === 'xmi'
           ? `/api/projects/${projectId}/diagrams/${diagramId}/xmi/import`
@@ -125,7 +137,7 @@ export function XmiModal({
 
       setStatusMessage({
         type: 'success',
-        text: `¡Importación exitosa! Se cargaron ${elCount} clases/tablas y ${relCount} relaciones al diagrama.`
+        text: `¡Importación exitosa! Se cargaron ${elCount} clases/tablas y ${relCount} relaciones al diagrama. Bloqueo de seguridad liberado.`
       })
 
       onDiagramUpdated(updated)
@@ -156,14 +168,33 @@ export function XmiModal({
   }
 
   return (
-    <div className="uml-modal-backdrop">
-      <div className="uml-modal xmi-modal" style={{ maxWidth: '680px', width: '90%' }}>
-        <div className="uml-modal-header">
-          <h3>📦 Exportación e Importación de Modelos (CU13)</h3>
+    <AiModalShell
+      title="Enterprise Architect XMI"
+      subtitle="Importación y exportación de modelos"
+      icon={<ExchangeIcon size={20} color="#1d4ed8" />}
+      onClose={onClose}
+    >
+      <div className="xmi-modal-content">
+        <div className="xmi-legacy-header" style={{ display: 'none' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+            <ExchangeIcon size={20} color="#1d4ed8" />
+            <div>
+              <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#0f172a', fontWeight: 'bold' }}>Enterprise Architect XMI & Interoperabilidad</h3>
+              <span style={{ fontSize: '0.82rem', color: '#475569' }}>
+                Importación/exportación con bloqueo colaborativo en tiempo real
+              </span>
+            </div>
+          </div>
           <button type="button" className="close-btn" onClick={onClose}>
             ✕
           </button>
         </div>
+
+        {isLocked && (
+          <div style={{ marginTop: '0.75rem', padding: '0.75rem 1rem', background: '#fef3c7', border: '1px solid #f59e0b', borderRadius: '6px', color: '#92400e', fontSize: '0.85rem', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <LockIcon size={16} /> El diagrama se encuentra bloqueado por <strong>{lockUser}</strong> durante una operación activa.
+          </div>
+        )}
 
         {/* Notificación de Estado */}
         {statusMessage && (
@@ -173,19 +204,22 @@ export function XmiModal({
               padding: '0.75rem 1rem',
               borderRadius: '6px',
               fontSize: '0.85rem',
-              fontWeight: 500,
+              fontWeight: 600,
               background: statusMessage.type === 'success' ? '#dcfce7' : '#fee2e2',
-              color: statusMessage.type === 'success' ? '#166534' : '#991b1b',
-              border: `1px solid ${statusMessage.type === 'success' ? '#86efac' : '#fca5a5'}`
+              color: statusMessage.type === 'success' ? '#14532d' : '#991b1b',
+              border: `1px solid ${statusMessage.type === 'success' ? '#86efac' : '#fca5a5'}`,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
             }}
           >
-            {statusMessage.type === 'success' ? '✅ ' : '⚠️ '}
+            {statusMessage.type === 'success' ? <CheckIcon size={16} /> : <AlertIcon size={16} />}
             {statusMessage.text}
           </div>
         )}
 
         {/* Selector de Formato: XMI / XML prioritario vs JSON nativo */}
-        <div style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem', borderBottom: '1px solid #e2e8f0', paddingBottom: '0.5rem' }}>
+        <div className="xmi-format-switcher" style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem', borderBottom: '1px solid #e2e8f0', paddingBottom: '0.5rem' }}>
           <button
             type="button"
             className={`tab-btn ${activeFormat === 'xmi' ? 'active' : ''}`}
@@ -200,7 +234,7 @@ export function XmiModal({
               cursor: 'pointer'
             }}
           >
-            🏢 Estándar OMG XMI / XML (.xmi, .xml)
+            🏢 Enterprise Architect XMI / XML (.xmi, .xml)
           </button>
           <button
             type="button"
@@ -220,18 +254,18 @@ export function XmiModal({
           </button>
         </div>
 
-        <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+        <div className="xmi-sections" style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
           {/* Sección de Exportación */}
-          <div style={{ background: '#f8fafc', padding: '1.25rem', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+          <div className="xmi-section xmi-export-section" style={{ background: '#f8fafc', padding: '1.25rem', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
               <h4 style={{ margin: 0 }}>Exportar Diagrama Actual</h4>
               <span style={{ fontSize: '0.75rem', background: '#dbeafe', color: '#1d4ed8', padding: '2px 8px', borderRadius: '4px', fontWeight: 600 }}>
-                {activeFormat === 'xmi' ? 'Formato OMG XMI 2.1 / XML' : 'Formato JSON'}
+                {activeFormat === 'xmi' ? 'Formato OMG XMI 2.1 / EA 6.5' : 'Formato JSON'}
               </span>
             </div>
             <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '1rem' }}>
               {activeFormat === 'xmi'
-                ? 'Genera un documento XML bajo el estándar OMG XMI compatible con Enterprise Architect, StarUML y Visual Paradigm, exportando clases, generalizaciones, asociaciones y cardinalidades en <ownedEnd>.'
+                ? 'Genera un documento XMI 2.1 / XML con la estructura completa de clases, interfaces, abstractas, enums, atributos, métodos, multiplicidades y geometría de lienzo compatible con Sparx Enterprise Architect.'
                 : 'Exporta la estructura completa con coordenadas en lienzo, estilos, descripciones y multiplicidades en formato JSON.'}
             </p>
             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
@@ -240,7 +274,7 @@ export function XmiModal({
                   <button
                     type="button"
                     className="btn btn-primary"
-                    disabled={loading}
+                    disabled={loading || isLocked}
                     onClick={() => handleExportXmi('xmi')}
                     style={{ background: '#2563eb', color: 'white', padding: '0.6rem 1.2rem', borderRadius: '6px', border: 'none', cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '6px' }}
                   >
@@ -249,7 +283,7 @@ export function XmiModal({
                   <button
                     type="button"
                     className="btn btn-secondary"
-                    disabled={loading}
+                    disabled={loading || isLocked}
                     onClick={() => handleExportXmi('xml')}
                     style={{ background: '#475569', color: 'white', padding: '0.6rem 1.2rem', borderRadius: '6px', border: 'none', cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '6px' }}
                   >
@@ -260,7 +294,7 @@ export function XmiModal({
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={loading}
+                  disabled={loading || isLocked}
                   onClick={handleExportJson}
                   style={{ background: '#2563eb', color: 'white', padding: '0.6rem 1.2rem', borderRadius: '6px', border: 'none', cursor: 'pointer', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '6px' }}
                 >
@@ -272,7 +306,7 @@ export function XmiModal({
 
           {/* Sección de Importación */}
           {!isReadOnly && (
-            <div style={{ background: '#f8fafc', padding: '1.25rem', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+            <div className="xmi-section xmi-import-section" style={{ background: '#f8fafc', padding: '1.25rem', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
                 <h4 style={{ margin: 0 }}>
                   Importar {activeFormat === 'xmi' ? 'Archivo XMI / XML (.xmi / .xml)' : 'Archivo JSON (.json)'}
@@ -285,16 +319,18 @@ export function XmiModal({
               </div>
               <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '0.75rem' }}>
                 {activeFormat === 'xmi'
-                  ? 'Compatible con archivos exportados de Enterprise Architect (XMI 1.1, 1.2, 2.1, Native XML, tablas relacionales con columnas), StarUML y Visual Paradigm.'
+                  ? 'Compatible con archivos exportados de Sparx Enterprise Architect (XMI 1.1, 2.1, Native XML, tablas relacionales con columnas), StarUML y Visual Paradigm.'
                   : 'Restaura fielmente el diagrama completo con clases, relaciones y posiciones exactas desde el archivo JSON:'}
               </p>
 
               <form onSubmit={handleImportSubmit}>
                 <div style={{ marginBottom: '0.75rem' }}>
                   <input
+                    className="xmi-file-input"
                     type="file"
                     accept={activeFormat === 'xmi' ? '.xmi,.xml,.uml' : '.json'}
                     onChange={handleFileSelected}
+                    disabled={isLocked}
                     style={{ fontSize: '0.85rem', display: 'block' }}
                   />
                   {selectedFileName && (
@@ -305,9 +341,11 @@ export function XmiModal({
                 </div>
 
                 <textarea
+                  className="xmi-import-textarea"
                   rows={6}
                   value={importText}
                   onChange={(e) => setImportText(e.target.value)}
+                  disabled={isLocked}
                   placeholder={
                     activeFormat === 'xmi'
                       ? 'O pega aquí directamente el contenido XML / XMI del archivo...'
@@ -319,7 +357,7 @@ export function XmiModal({
                 <div style={{ marginTop: '0.75rem', display: 'flex', justifyContent: 'flex-end' }}>
                   <button
                     type="submit"
-                    disabled={loading || !importText.trim()}
+                    disabled={loading || isLocked || !importText.trim()}
                     className="btn btn-primary"
                     style={{ background: '#16a34a', color: 'white', padding: '0.5rem 1rem', borderRadius: '6px', border: 'none', cursor: 'pointer', fontWeight: 600 }}
                   >
@@ -331,12 +369,12 @@ export function XmiModal({
           )}
         </div>
 
-        <div className="uml-modal-actions" style={{ marginTop: '1.25rem', display: 'flex', justifyContent: 'flex-end' }}>
+        <div className="uml-modal-actions xmi-modal-actions" style={{ marginTop: '1.25rem', display: 'flex', justifyContent: 'flex-end' }}>
           <button type="button" className="btn btn-secondary" onClick={onClose} style={{ padding: '0.4rem 1rem', borderRadius: '6px' }}>
             Cerrar
           </button>
         </div>
       </div>
-    </div>
+    </AiModalShell>
   )
 }

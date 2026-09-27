@@ -49,379 +49,423 @@ public class XmiService {
     this.wsHandler = wsHandler;
   }
 
-  @Transactional(readOnly = true)
   public String exportXmi(UUID projectId, UUID diagramId, String email) {
     projectService.requireAccess(projectId, email);
     DiagramaClase diagram = validateDiagram(projectId, diagramId);
     List<ElementoUML> elements = elementRepo.findByDiagramaId(diagramId);
     List<RelacionUML> relations = relationRepo.findByDiagramaId(diagramId);
 
-    // Mapear nombres de clases a su xmi:id y pre-parsear propiedades JSON
-    Map<String, String> classNameToIdMap = new HashMap<>();
-    Map<UUID, JsonNode> propsMap = new HashMap<>();
-    for (ElementoUML el : elements) {
-      classNameToIdMap.put(el.getNombre().trim().toLowerCase(), "el_" + el.getId());
-      try {
-        if (el.getPropiedadesJson() != null && !el.getPropiedadesJson().isBlank()) {
-          propsMap.put(el.getId(), objectMapper.readTree(el.getPropiedadesJson()));
-        }
-      } catch (Exception ignored) {}
-    }
-
-    // Recopilar todos los tipos de datos únicos de atributos y operaciones
-    Map<String, String> typeToIdMap = new LinkedHashMap<>();
-    for (ElementoUML el : elements) {
-      JsonNode root = propsMap.get(el.getId());
-      if (root == null) continue;
-      JsonNode attrs = root.path("attributes");
-      if (attrs.isArray()) {
-        for (JsonNode a : attrs) {
-          String rawType = a.path("type").asText("String").trim();
-          if (rawType.isBlank()) rawType = "String";
-          if (!classNameToIdMap.containsKey(rawType.toLowerCase())) {
-            typeToIdMap.putIfAbsent(rawType, "dt_" + sanitizeId(rawType));
+      Map<UUID, JsonNode> propsMap = new HashMap<>();
+      for (ElementoUML el : elements) {
+        try {
+          if (el.getPropiedadesJson() != null && !el.getPropiedadesJson().isBlank()) {
+            propsMap.put(el.getId(), objectMapper.readTree(el.getPropiedadesJson()));
           }
-        }
+        } catch (Exception ignored) {}
       }
-      JsonNode methods = root.path("methods");
-      if (methods.isArray()) {
-        for (JsonNode m : methods) {
-          String retType = m.path("returnType").asText("void").trim();
-          if (retType.isBlank()) retType = "void";
-          if (!classNameToIdMap.containsKey(retType.toLowerCase()) && !"void".equalsIgnoreCase(retType)) {
-            typeToIdMap.putIfAbsent(retType, "dt_" + sanitizeId(retType));
-          }
-        }
-      }
-    }
 
-    StringBuilder sb = new StringBuilder();
-    sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    sb.append("<xmi:XMI xmi:version=\"2.1\" xmlns:uml=\"http://schema.omg.org/spec/UML/2.1\" xmlns:xmi=\"http://schema.omg.org/spec/XMI/2.1\">\n");
-    sb.append("  <xmi:Documentation exporter=\"Enterprise Architect\" exporterVersion=\"6.5\"/>\n");
-    sb.append("  <uml:Model xmi:type=\"uml:Model\" xmi:id=\"model_").append(diagram.getId()).append("\" name=\"").append(escapeXml(diagram.getNombre())).append("\">\n");
+      String pkgGuid = "EAPK_" + diagram.getId().toString().replace("-", "_").toUpperCase();
+      String diagGuid = "EAID_" + UUID.randomUUID().toString().replace("-", "_").toUpperCase();
+      String modelGuid = "MX_EAID_" + UUID.randomUUID().toString().replace("-", "_").toUpperCase();
 
-    // 1. Declarar tipos primitivos en el modelo UML para resolución por IDREF
-    for (Map.Entry<String, String> entry : typeToIdMap.entrySet()) {
-      String typeName = entry.getKey();
-      String typeId = entry.getValue();
-      sb.append("    <packagedElement xmi:type=\"uml:PrimitiveType\" xmi:id=\"")
-        .append(typeId).append("\" name=\"").append(escapeXml(typeName)).append("\"/>\n");
-    }
+      StringBuilder sb = new StringBuilder();
+      sb.append("<?xml version=\"1.0\" encoding=\"windows-1252\"?>\n");
+      sb.append("<XMI xmi.version=\"1.1\" xmlns:xmi=\"http://www.omg.org/XMI\" xmlns:UML=\"omg.org/UML1.3\" timestamp=\"2026-09-26 12:00:00\">\n");
+      sb.append("  <XMI.header>\n");
+      sb.append("    <XMI.documentation>\n");
+      sb.append("      <XMI.exporter>Enterprise Architect</XMI.exporter>\n");
+      sb.append("      <XMI.exporterVersion>2.5</XMI.exporterVersion>\n");
+      sb.append("    </XMI.documentation>\n");
+      sb.append("  </XMI.header>\n");
+      sb.append("  <XMI.content>\n");
+      sb.append("    <UML:Model name=\"EA Model\" xmi.id=\"").append(modelGuid).append("\">\n");
+      sb.append("      <UML:Namespace.ownedElement>\n");
+      sb.append("        <UML:Class name=\"EARootClass\" xmi.id=\"EAID_11111111_5487_4080_A7F4_41526CB0AA00\" isRoot=\"true\" isLeaf=\"false\" isAbstract=\"false\"/>\n");
+      sb.append("        <UML:Package name=\"").append(escapeXml(diagram.getNombre())).append("\" xmi.id=\"").append(pkgGuid).append("\" isRoot=\"false\" isLeaf=\"false\" isAbstract=\"false\" visibility=\"public\">\n");
+      sb.append("          <UML:ModelElement.taggedValue>\n");
+      sb.append("            <UML:TaggedValue tag=\"parent\" value=\"EAPK_ROOT\"/>\n");
+      sb.append("            <UML:TaggedValue tag=\"ea_package_id\" value=\"2\"/>\n");
+      sb.append("            <UML:TaggedValue tag=\"iscontrolled\" value=\"FALSE\"/>\n");
+      sb.append("            <UML:TaggedValue tag=\"isprotected\" value=\"FALSE\"/>\n");
+      sb.append("            <UML:TaggedValue tag=\"usedtd\" value=\"FALSE\"/>\n");
+      sb.append("            <UML:TaggedValue tag=\"logxml\" value=\"FALSE\"/>\n");
+      sb.append("            <UML:TaggedValue tag=\"tpos\" value=\"0\"/>\n");
+      sb.append("            <UML:TaggedValue tag=\"phase\" value=\"1.0\"/>\n");
+      sb.append("            <UML:TaggedValue tag=\"status\" value=\"Proposed\"/>\n");
+      sb.append("            <UML:TaggedValue tag=\"author\" value=\"Herramienta CASE\"/>\n");
+      sb.append("            <UML:TaggedValue tag=\"complexity\" value=\"1\"/>\n");
+      sb.append("            <UML:TaggedValue tag=\"ea_stype\" value=\"Public\"/>\n");
+      sb.append("            <UML:TaggedValue tag=\"gentype\" value=\"Java\"/>\n");
+      sb.append("          </UML:ModelElement.taggedValue>\n");
+      sb.append("          <UML:Namespace.ownedElement>\n");
 
-    // 2. Clases y elementos con sus atributos tipados y operaciones
-    for (ElementoUML el : elements) {
-      String umlType = switch (el.getTipoElemento()) {
-        case INTERFAZ -> "uml:Interface";
-        case ENUMERACION -> "uml:Enumeration";
-        default -> "uml:Class";
-      };
+      // 1. Clases / Interfaces / Enumeraciones
+      for (ElementoUML el : elements) {
+        String elGuid = "EAID_" + el.getId().toString().replace("-", "_").toUpperCase();
+        String eaStype = switch (el.getTipoElemento()) {
+          case INTERFAZ -> "Interface";
+          case ENUMERACION -> "Enumeration";
+          default -> "Class";
+        };
+        boolean isAbs = el.getTipoElemento() == TipoElementoUML.CLASE_ABSTRACTA;
+        String elementTag = switch (el.getTipoElemento()) {
+          case INTERFAZ -> "UML:Interface";
+          case ENUMERACION -> "UML:Enumeration";
+          default -> "UML:Class";
+        };
 
-      sb.append("    <packagedElement xmi:type=\"").append(umlType).append("\" xmi:id=\"el_").append(el.getId()).append("\" name=\"").append(escapeXml(el.getNombre())).append("\"");
-      if (el.getTipoElemento() == TipoElementoUML.CLASE_ABSTRACTA) {
-        sb.append(" isAbstract=\"true\"");
-      }
-      sb.append(">\n");
+        sb.append("            <").append(elementTag).append(" name=\"").append(escapeXml(el.getNombre()))
+          .append("\" xmi.id=\"").append(elGuid)
+          .append("\" visibility=\"public\" namespace=\"").append(pkgGuid)
+          .append("\" isRoot=\"false\" isLeaf=\"false\" isAbstract=\"").append(isAbs ? "true" : "false")
+          .append("\" isActive=\"false\">\n");
 
-      JsonNode root = propsMap.get(el.getId());
-      if (root != null) {
-        JsonNode attrs = root.path("attributes");
-        if (attrs.isArray()) {
-          for (JsonNode a : attrs) {
-            String attrId = a.path("id").asText(UUID.randomUUID().toString());
-            String name = a.path("name").asText().trim();
-            if (name.isBlank()) continue;
-            String rawType = a.path("type").asText("String").trim();
-            if (rawType.isBlank()) rawType = "String";
-            String vis = a.path("visibility").asText("+");
-            String visibility = switch (vis) {
-              case "-" -> "private";
-              case "#" -> "protected";
-              case "~" -> "package";
-              default -> "public";
-            };
+        sb.append("              <UML:ModelElement.taggedValue>\n");
+        sb.append("                <UML:TaggedValue tag=\"isSpecification\" value=\"false\"/>\n");
+        sb.append("                <UML:TaggedValue tag=\"ea_stype\" value=\"").append(eaStype).append("\"/>\n");
+        sb.append("                <UML:TaggedValue tag=\"ea_ntype\" value=\"0\"/>\n");
+        sb.append("                <UML:TaggedValue tag=\"version\" value=\"1.0\"/>\n");
+        sb.append("                <UML:TaggedValue tag=\"package\" value=\"").append(pkgGuid).append("\"/>\n");
+        sb.append("                <UML:TaggedValue tag=\"gentype\" value=\"Java\"/>\n");
+        sb.append("                <UML:TaggedValue tag=\"package_name\" value=\"").append(escapeXml(diagram.getNombre())).append("\"/>\n");
+        sb.append("                <UML:TaggedValue tag=\"author\" value=\"Herramienta CASE\"/>\n");
+        sb.append("                <UML:TaggedValue tag=\"status\" value=\"Proposed\"/>\n");
+        sb.append("                <UML:TaggedValue tag=\"style\" value=\"BackColor=-1;BorderColor=-1;BorderWidth=-1;FontColor=-1;VSwimLanes=1;HSwimLanes=1;BorderStyle=0;\"/>\n");
+        sb.append("              </UML:ModelElement.taggedValue>\n");
 
-            String resolvedTypeId = classNameToIdMap.getOrDefault(
-                rawType.toLowerCase(),
-                typeToIdMap.getOrDefault(rawType, "dt_" + sanitizeId(rawType))
-            );
+        JsonNode root = propsMap.get(el.getId());
+        JsonNode attrs = root != null ? root.path("attributes") : null;
+        JsonNode methods = root != null ? root.path("methods") : null;
 
-            sb.append("      <ownedAttribute xmi:type=\"uml:Property\" xmi:id=\"attr_").append(attrId)
-              .append("\" name=\"").append(escapeXml(name))
-              .append("\" visibility=\"").append(visibility)
-              .append("\" type=\"").append(resolvedTypeId).append("\">\n");
-            sb.append("        <type xmi:type=\"uml:PrimitiveType\" xmi:idref=\"").append(resolvedTypeId).append("\"/>\n");
-            sb.append("      </ownedAttribute>\n");
-          }
-        }
+        boolean hasAttrs = attrs != null && attrs.isArray() && attrs.size() > 0;
+        boolean hasMethods = methods != null && methods.isArray() && methods.size() > 0;
 
-        JsonNode methods = root.path("methods");
-        if (methods.isArray()) {
-          for (JsonNode m : methods) {
-            String opId = m.path("id").asText(UUID.randomUUID().toString());
-            String opName = m.path("name").asText().trim();
-            if (opName.isBlank()) continue;
-            String retType = m.path("returnType").asText("void").trim();
-            if (retType.isBlank()) retType = "void";
-            String vis = m.path("visibility").asText("+");
-            String visibility = switch (vis) {
-              case "-" -> "private";
-              case "#" -> "protected";
-              case "~" -> "package";
-              default -> "public";
-            };
+        if (hasAttrs || hasMethods) {
+          sb.append("              <UML:Classifier.feature>\n");
+          if (hasAttrs) {
+            int pos = 0;
+            for (JsonNode a : attrs) {
+              String name = a.path("name").asText().trim();
+              if (name.isBlank()) continue;
+              String attrGuid = "EAID_" + UUID.randomUUID().toString().replace("-", "_").toUpperCase();
+              String rawType = a.path("type").asText("String").trim();
+              if (rawType.isBlank()) rawType = "String";
+              String vis = a.path("visibility").asText("+");
+              String visibility = switch (vis) {
+                case "-" -> "private";
+                case "#" -> "protected";
+                case "~" -> "package";
+                default -> "public";
+              };
 
-            sb.append("      <ownedOperation xmi:type=\"uml:Operation\" xmi:id=\"op_").append(opId)
-              .append("\" name=\"").append(escapeXml(opName))
-              .append("\" visibility=\"").append(visibility)
-              .append("\">\n");
-
-            if (!"void".equalsIgnoreCase(retType)) {
-              String retTypeId = classNameToIdMap.getOrDefault(
-                  retType.toLowerCase(),
-                  typeToIdMap.getOrDefault(retType, "dt_" + sanitizeId(retType))
-              );
-              sb.append("        <ownedParameter xmi:type=\"uml:Parameter\" xmi:id=\"param_ret_").append(opId)
-                .append("\" direction=\"return\" type=\"").append(retTypeId).append("\">\n");
-              sb.append("          <type xmi:type=\"uml:PrimitiveType\" xmi:idref=\"").append(retTypeId).append("\"/>\n");
-              sb.append("        </ownedParameter>\n");
+              sb.append("                <UML:Attribute name=\"").append(escapeXml(name))
+                .append("\" xmi.id=\"").append(attrGuid)
+                .append("\" visibility=\"").append(visibility)
+                .append("\" changeability=\"changeable\">\n");
+              sb.append("                  <UML:Attribute.initialValue><UML:Expression body=\"\"/></UML:Attribute.initialValue>\n");
+              sb.append("                  <UML:StructuralFeature.type><UML:Classifier xmi.idref=\"").append(escapeXml(rawType)).append("\"/></UML:StructuralFeature.type>\n");
+              sb.append("                  <UML:ModelElement.taggedValue>\n");
+              sb.append("                    <UML:TaggedValue tag=\"type\" value=\"").append(escapeXml(rawType)).append("\"/>\n");
+              sb.append("                    <UML:TaggedValue tag=\"derived\" value=\"0\"/>\n");
+              sb.append("                    <UML:TaggedValue tag=\"containment\" value=\"Not Specified\"/>\n");
+              sb.append("                    <UML:TaggedValue tag=\"position\" value=\"").append(pos).append("\"/>\n");
+              sb.append("                    <UML:TaggedValue tag=\"lowerBound\" value=\"1\"/>\n");
+              sb.append("                    <UML:TaggedValue tag=\"upperBound\" value=\"1\"/>\n");
+              sb.append("                    <UML:TaggedValue tag=\"ea_guid\" value=\"").append(attrGuid).append("\"/>\n");
+              sb.append("                    <UML:TaggedValue tag=\"ea_localid\" value=\"").append(pos).append("\"/>\n");
+              sb.append("                  </UML:ModelElement.taggedValue>\n");
+              sb.append("                </UML:Attribute>\n");
+              pos++;
             }
-            sb.append("      </ownedOperation>\n");
           }
+
+          if (hasMethods) {
+            int pos = 0;
+            for (JsonNode m : methods) {
+              String opName = m.path("name").asText().trim();
+              if (opName.isBlank()) continue;
+              String opGuid = "EAID_" + UUID.randomUUID().toString().replace("-", "_").toUpperCase();
+              String retType = m.path("returnType").asText("void").trim();
+              if (retType.isBlank()) retType = "void";
+              String vis = m.path("visibility").asText("+");
+              String visibility = switch (vis) {
+                case "-" -> "private";
+                case "#" -> "protected";
+                case "~" -> "package";
+                default -> "public";
+              };
+
+              sb.append("                <UML:Operation name=\"").append(escapeXml(opName))
+                .append("\" xmi.id=\"").append(opGuid)
+                .append("\" visibility=\"").append(visibility)
+                .append("\" isAbstract=\"false\" concurrency=\"sequential\" isQuery=\"false\">\n");
+              sb.append("                  <UML:ModelElement.taggedValue>\n");
+              sb.append("                    <UML:TaggedValue tag=\"type\" value=\"").append(escapeXml(retType)).append("\"/>\n");
+              sb.append("                    <UML:TaggedValue tag=\"concurrency\" value=\"Sequential\"/>\n");
+              sb.append("                    <UML:TaggedValue tag=\"position\" value=\"").append(pos).append("\"/>\n");
+              sb.append("                    <UML:TaggedValue tag=\"ea_guid\" value=\"").append(opGuid).append("\"/>\n");
+              sb.append("                    <UML:TaggedValue tag=\"ea_localid\" value=\"").append(pos).append("\"/>\n");
+              sb.append("                  </UML:ModelElement.taggedValue>\n");
+
+              if (!"void".equalsIgnoreCase(retType)) {
+                String paramGuid = "EAID_" + UUID.randomUUID().toString().replace("-", "_").toUpperCase();
+                sb.append("                  <UML:BehavioralFeature.parameter>\n");
+                sb.append("                    <UML:Parameter name=\"return\" xmi.id=\"").append(paramGuid).append("\" kind=\"return\">\n");
+                sb.append("                      <UML:Parameter.type><UML:Classifier xmi.idref=\"").append(escapeXml(retType)).append("\"/></UML:Parameter.type>\n");
+                sb.append("                      <UML:ModelElement.taggedValue><UML:TaggedValue tag=\"type\" value=\"").append(escapeXml(retType)).append("\"/></UML:ModelElement.taggedValue>\n");
+                sb.append("                    </UML:Parameter>\n");
+                sb.append("                  </UML:BehavioralFeature.parameter>\n");
+              }
+
+              sb.append("                </UML:Operation>\n");
+              pos++;
+            }
+          }
+          sb.append("              </UML:Classifier.feature>\n");
         }
+
+        sb.append("            </").append(elementTag).append(">\n");
       }
 
-      sb.append("    </packagedElement>\n");
-    }
-
-    // 3. Relaciones con cardinalidades completas en <uml:Model>
-    for (RelacionUML rel : relations) {
-      if (rel.getElementoOrigen() == null || rel.getElementoDestino() == null) continue;
-      String origId = "el_" + rel.getElementoOrigen().getId();
-      String destId = "el_" + rel.getElementoDestino().getId();
-
-      if (rel.getTipoRelacion() == TipoRelacionUML.HERENCIA) {
-        sb.append("    <packagedElement xmi:type=\"uml:Generalization\" xmi:id=\"rel_").append(rel.getId()).append("\" specific=\"").append(origId).append("\" general=\"").append(destId).append("\"/>\n");
-      } else {
-        String assocType = rel.getTipoRelacion() == TipoRelacionUML.COMPOSICION ? "composite" : rel.getTipoRelacion() == TipoRelacionUML.AGREGACION ? "shared" : "none";
-        String multOrig = rel.getMultiplicidadOrigen() != null ? rel.getMultiplicidadOrigen().trim() : "";
-        String multDest = rel.getMultiplicidadDestino() != null ? rel.getMultiplicidadDestino().trim() : "";
-
-        sb.append("    <packagedElement xmi:type=\"uml:Association\" xmi:id=\"rel_").append(rel.getId()).append("\" name=\"").append(escapeXml(rel.getNombreRelacion() != null ? rel.getNombreRelacion() : "")).append("\">\n");
-        sb.append("      <memberEnd xmi:idref=\"end_orig_").append(rel.getId()).append("\"/>\n");
-        sb.append("      <memberEnd xmi:idref=\"end_dest_").append(rel.getId()).append("\"/>\n");
-
-        // Extremo Origen
-        sb.append("      <ownedEnd xmi:type=\"uml:Property\" xmi:id=\"end_orig_").append(rel.getId()).append("\" type=\"").append(origId).append("\" aggregation=\"").append(assocType).append("\"");
-        if (!multOrig.isBlank()) {
-          sb.append(" multiplicity=\"").append(escapeXml(multOrig)).append("\"");
-        }
-        sb.append(">\n");
-        if (!multOrig.isBlank()) {
-          String[] bounds = parseMultiplicityBounds(multOrig);
-          sb.append("        <lowerValue xmi:type=\"uml:LiteralString\" xmi:id=\"low_orig_").append(rel.getId()).append("\" value=\"").append(escapeXml(bounds[0])).append("\"/>\n");
-          sb.append("        <upperValue xmi:type=\"uml:LiteralString\" xmi:id=\"upp_orig_").append(rel.getId()).append("\" value=\"").append(escapeXml(bounds[1])).append("\"/>\n");
-        }
-        sb.append("      </ownedEnd>\n");
-
-        // Extremo Destino
-        sb.append("      <ownedEnd xmi:type=\"uml:Property\" xmi:id=\"end_dest_").append(rel.getId()).append("\" type=\"").append(destId).append("\"");
-        if (!multDest.isBlank()) {
-          sb.append(" multiplicity=\"").append(escapeXml(multDest)).append("\"");
-        }
-        sb.append(">\n");
-        if (!multDest.isBlank()) {
-          String[] bounds = parseMultiplicityBounds(multDest);
-          sb.append("        <lowerValue xmi:type=\"uml:LiteralString\" xmi:id=\"low_dest_").append(rel.getId()).append("\" value=\"").append(escapeXml(bounds[0])).append("\"/>\n");
-          sb.append("        <upperValue xmi:type=\"uml:LiteralString\" xmi:id=\"upp_dest_").append(rel.getId()).append("\" value=\"").append(escapeXml(bounds[1])).append("\"/>\n");
-        }
-        sb.append("      </ownedEnd>\n");
-
-        sb.append("    </packagedElement>\n");
-      }
-    }
-
-    sb.append("  </uml:Model>\n");
-
-    // 4. Extensión nativa de Enterprise Architect (preserva tipos de datos exactos, operaciones y geometría visual)
-    sb.append("  <xmi:Extension extender=\"Enterprise Architect\" extenderID=\"6.5\">\n");
-    sb.append("    <elements>\n");
-
-    for (ElementoUML el : elements) {
-      String sType = switch (el.getTipoElemento()) {
-        case INTERFAZ -> "Interface";
-        case ENUMERACION -> "Enumeration";
-        default -> "Class";
-      };
-      String isAbstractStr = (el.getTipoElemento() == TipoElementoUML.CLASE_ABSTRACTA) ? "true" : "false";
-
-      sb.append("      <element xmi:idref=\"el_").append(el.getId())
-        .append("\" xmi:type=\"uml:").append(sType)
-        .append("\" name=\"").append(escapeXml(el.getNombre()))
-        .append("\" scope=\"public\">\n");
-      sb.append("        <properties sType=\"").append(sType)
-        .append("\" nType=\"0\" scope=\"public\" isRoot=\"false\" isLeaf=\"false\" isAbstract=\"")
-        .append(isAbstractStr).append("\"/>\n");
-      sb.append("        <project author=\"Herramienta CASE\" version=\"1.0\" status=\"Proposed\"/>\n");
-
-      JsonNode root = propsMap.get(el.getId());
-      if (root != null) {
-        JsonNode attrs = root.path("attributes");
-        if (attrs.isArray() && attrs.size() > 0) {
-          sb.append("        <attributes>\n");
-          int pos = 0;
-          for (JsonNode a : attrs) {
-            String attrId = a.path("id").asText(UUID.randomUUID().toString());
-            String name = a.path("name").asText().trim();
-            if (name.isBlank()) continue;
-            String rawType = a.path("type").asText("String").trim();
-            if (rawType.isBlank()) rawType = "String";
-            String vis = a.path("visibility").asText("+");
-            String scope = switch (vis) {
-              case "-" -> "Private";
-              case "#" -> "Protected";
-              case "~" -> "Package";
-              default -> "Public";
-            };
-
-            sb.append("          <attribute xmi:idref=\"attr_").append(attrId)
-              .append("\" name=\"").append(escapeXml(name))
-              .append("\" scope=\"").append(scope)
-              .append("\" type=\"").append(escapeXml(rawType)).append("\">\n");
-            sb.append("            <properties type=\"").append(escapeXml(rawType))
-              .append("\" precision=\"0\" scale=\"0\" collection=\"false\" position=\"").append(pos)
-              .append("\" lowerBound=\"1\" upperBound=\"1\" duplicates=\"0\" changeability=\"changeable\"/>\n");
-            sb.append("            <coords/>\n");
-            sb.append("            <containment containment=\"Not Specified\" position=\"").append(pos).append("\"/>\n");
-            sb.append("          </attribute>\n");
-            pos++;
-          }
-          sb.append("        </attributes>\n");
-        }
-
-        JsonNode methods = root.path("methods");
-        if (methods.isArray() && methods.size() > 0) {
-          sb.append("        <operations>\n");
-          for (JsonNode m : methods) {
-            String opId = m.path("id").asText(UUID.randomUUID().toString());
-            String opName = m.path("name").asText().trim();
-            if (opName.isBlank()) continue;
-            String retType = m.path("returnType").asText("void").trim();
-            if (retType.isBlank()) retType = "void";
-            String vis = m.path("visibility").asText("+");
-            String scope = switch (vis) {
-              case "-" -> "Private";
-              case "#" -> "Protected";
-              case "~" -> "Package";
-              default -> "Public";
-            };
-
-            sb.append("          <operation xmi:idref=\"op_").append(opId)
-              .append("\" name=\"").append(escapeXml(opName))
-              .append("\" type=\"").append(escapeXml(retType)).append("\">\n");
-            sb.append("            <properties type=\"").append(escapeXml(retType))
-              .append("\" scope=\"").append(scope).append("\"/>\n");
-            sb.append("          </operation>\n");
-          }
-          sb.append("        </operations>\n");
-        }
-      }
-
-      sb.append("      </element>\n");
-    }
-
-    sb.append("    </elements>\n");
-
-    // Conectores en la extensión de EA
-    if (!relations.isEmpty()) {
-      sb.append("    <connectors>\n");
+      // 2. Relaciones (Asociaciones, Agregaciones, Composiciones, Herencias)
       for (RelacionUML rel : relations) {
         if (rel.getElementoOrigen() == null || rel.getElementoDestino() == null) continue;
-        String origId = "el_" + rel.getElementoOrigen().getId();
-        String destId = "el_" + rel.getElementoDestino().getId();
+        String relGuid = "EAID_" + rel.getId().toString().replace("-", "_").toUpperCase();
+        String origGuid = "EAID_" + rel.getElementoOrigen().getId().toString().replace("-", "_").toUpperCase();
+        String destGuid = "EAID_" + rel.getElementoDestino().getId().toString().replace("-", "_").toUpperCase();
         String origName = rel.getElementoOrigen().getNombre();
         String destName = rel.getElementoDestino().getNombre();
-        String multOrig = rel.getMultiplicidadOrigen() != null ? rel.getMultiplicidadOrigen().trim() : "";
-        String multDest = rel.getMultiplicidadDestino() != null ? rel.getMultiplicidadDestino().trim() : "";
         String relName = rel.getNombreRelacion() != null ? rel.getNombreRelacion() : "";
 
-        String eaType = switch (rel.getTipoRelacion()) {
-          case HERENCIA -> "Generalization";
-          case AGREGACION -> "Aggregation";
-          case COMPOSICION -> "Composition";
-          default -> "Association";
-        };
-        String aggAttr = rel.getTipoRelacion() == TipoRelacionUML.COMPOSICION ? "composite" :
-                         rel.getTipoRelacion() == TipoRelacionUML.AGREGACION ? "shared" : "none";
+        if (rel.getTipoRelacion() == TipoRelacionUML.HERENCIA) {
+          sb.append("            <UML:Generalization xmi.id=\"").append(relGuid)
+            .append("\" child=\"").append(origGuid)
+            .append("\" parent=\"").append(destGuid)
+            .append("\" visibility=\"public\">\n");
+          sb.append("              <UML:ModelElement.taggedValue>\n");
+          sb.append("                <UML:TaggedValue tag=\"style\" value=\"3\"/>\n");
+          sb.append("                <UML:TaggedValue tag=\"ea_type\" value=\"Generalization\"/>\n");
+          sb.append("                <UML:TaggedValue tag=\"direction\" value=\"Source -&gt; Destination\"/>\n");
+          sb.append("                <UML:TaggedValue tag=\"linemode\" value=\"3\"/>\n");
+          sb.append("                <UML:TaggedValue tag=\"ea_sourceName\" value=\"").append(escapeXml(origName)).append("\"/>\n");
+          sb.append("                <UML:TaggedValue tag=\"ea_targetName\" value=\"").append(escapeXml(destName)).append("\"/>\n");
+          sb.append("                <UML:TaggedValue tag=\"ea_sourceType\" value=\"Class\"/>\n");
+          sb.append("                <UML:TaggedValue tag=\"ea_targetType\" value=\"Class\"/>\n");
+          sb.append("              </UML:ModelElement.taggedValue>\n");
+          sb.append("            </UML:Generalization>\n");
+        } else if (rel.getTipoRelacion() == TipoRelacionUML.DEPENDENCIA) {
+          appendDependency(sb, rel, relGuid, origGuid, destGuid, origName, destName, relName);
+        } else if (rel.getTipoRelacion() == TipoRelacionUML.REALIZACION) {
+          appendRealization(sb, rel, relGuid, origGuid, destGuid, origName, destName, relName);
+        } else {
+          String eaType = switch (rel.getTipoRelacion()) {
+            case COMPOSICION -> "Composition";
+            case AGREGACION -> "Aggregation";
+            case DEPENDENCIA -> "Dependency";
+            default -> "Association";
+          };
+          String aggOrig = rel.getTipoRelacion() == TipoRelacionUML.COMPOSICION ? "composite" :
+                           rel.getTipoRelacion() == TipoRelacionUML.AGREGACION ? "shared" : "none";
 
-        sb.append("      <connector xmi:idref=\"rel_").append(rel.getId()).append("\">\n");
-        sb.append("        <source xmi:idref=\"").append(origId).append("\">\n");
-        sb.append("          <model type=\"Class\" name=\"").append(escapeXml(origName)).append("\"/>\n");
-        sb.append("          <type multiplicity=\"").append(escapeXml(multOrig))
-          .append("\" aggregation=\"").append(aggAttr).append("\"/>\n");
-        sb.append("        </source>\n");
-        sb.append("        <target xmi:idref=\"").append(destId).append("\">\n");
-        sb.append("          <model type=\"Class\" name=\"").append(escapeXml(destName)).append("\"/>\n");
-        sb.append("          <type multiplicity=\"").append(escapeXml(multDest))
-          .append("\" aggregation=\"none\"/>\n");
-        sb.append("        </target>\n");
-        sb.append("        <properties ea_type=\"").append(eaType)
-          .append("\" direction=\"Unspecified\" name=\"").append(escapeXml(relName)).append("\"/>\n");
-        sb.append("      </connector>\n");
+          String multOrig = rel.getMultiplicidadOrigen() != null ? rel.getMultiplicidadOrigen().trim() : "";
+          String multDest = rel.getMultiplicidadDestino() != null ? rel.getMultiplicidadDestino().trim() : "";
+          String[] boundsOrig = parseMultiplicityBoundsUpperLower(multOrig);
+          String[] boundsDest = parseMultiplicityBoundsUpperLower(multDest);
+
+          sb.append("            <UML:Association name=\"").append(escapeXml(relName))
+            .append("\" xmi.id=\"").append(relGuid)
+            .append("\" visibility=\"public\" isRoot=\"false\" isLeaf=\"false\" isAbstract=\"false\">\n");
+          sb.append("              <UML:ModelElement.taggedValue>\n");
+          sb.append("                <UML:TaggedValue tag=\"style\" value=\"3\"/>\n");
+          sb.append("                <UML:TaggedValue tag=\"ea_type\" value=\"").append(eaType).append("\"/>\n");
+          sb.append("                <UML:TaggedValue tag=\"direction\" value=\"Unspecified\"/>\n");
+          sb.append("                <UML:TaggedValue tag=\"linemode\" value=\"3\"/>\n");
+          sb.append("                <UML:TaggedValue tag=\"ea_sourceName\" value=\"").append(escapeXml(origName)).append("\"/>\n");
+          sb.append("                <UML:TaggedValue tag=\"ea_targetName\" value=\"").append(escapeXml(destName)).append("\"/>\n");
+          sb.append("                <UML:TaggedValue tag=\"ea_sourceType\" value=\"Class\"/>\n");
+          sb.append("                <UML:TaggedValue tag=\"ea_targetType\" value=\"Class\"/>\n");
+          sb.append("                <UML:TaggedValue tag=\"mt\" value=\"").append(escapeXml(relName)).append("\"/>\n");
+          sb.append("              </UML:ModelElement.taggedValue>\n");
+
+          sb.append("              <UML:Association.connection>\n");
+          sb.append("                <UML:AssociationEnd visibility=\"public\" aggregation=\"").append(aggOrig)
+            .append("\" isOrdered=\"false\" isNavigable=\"true\" type=\"").append(origGuid).append("\">\n");
+          sb.append("                  <UML:AssociationEnd.multiplicity>\n");
+          sb.append("                    <UML:Multiplicity><UML:Multiplicity.range>\n");
+          sb.append("                      <UML:MultiplicityRange lower=\"").append(escapeXml(boundsOrig[0]))
+            .append("\" upper=\"").append(escapeXml(boundsOrig[1])).append("\"/>\n");
+          sb.append("                    </UML:Multiplicity.range></UML:Multiplicity>\n");
+          sb.append("                  </UML:AssociationEnd.multiplicity>\n");
+          sb.append("                  <UML:AssociationEnd.participant><UML:Class xmi.idref=\"").append(origGuid).append("\"/></UML:AssociationEnd.participant>\n");
+          sb.append("                  <UML:ModelElement.taggedValue>\n");
+          sb.append("                    <UML:TaggedValue tag=\"sourcestyle\" value=\"Navigable=Unspecified;Owned=0;\"/>\n");
+          sb.append("                    <UML:TaggedValue tag=\"ea_end\" value=\"source\"/>\n");
+          sb.append("                  </UML:ModelElement.taggedValue>\n");
+          sb.append("                </UML:AssociationEnd>\n");
+
+          sb.append("                <UML:AssociationEnd visibility=\"public\" aggregation=\"none\" isOrdered=\"false\" isNavigable=\"true\" type=\"").append(destGuid).append("\">\n");
+          sb.append("                  <UML:AssociationEnd.multiplicity>\n");
+          sb.append("                    <UML:Multiplicity><UML:Multiplicity.range>\n");
+          sb.append("                      <UML:MultiplicityRange lower=\"").append(escapeXml(boundsDest[0]))
+            .append("\" upper=\"").append(escapeXml(boundsDest[1])).append("\"/>\n");
+          sb.append("                    </UML:Multiplicity.range></UML:Multiplicity>\n");
+          sb.append("                  </UML:AssociationEnd.multiplicity>\n");
+          sb.append("                  <UML:AssociationEnd.participant><UML:Class xmi.idref=\"").append(destGuid).append("\"/></UML:AssociationEnd.participant>\n");
+          sb.append("                  <UML:ModelElement.taggedValue>\n");
+          sb.append("                    <UML:TaggedValue tag=\"deststyle\" value=\"Navigable=Unspecified;Owned=0;\"/>\n");
+          sb.append("                    <UML:TaggedValue tag=\"ea_end\" value=\"target\"/>\n");
+          sb.append("                  </UML:ModelElement.taggedValue>\n");
+          sb.append("                </UML:AssociationEnd>\n");
+          sb.append("              </UML:Association.connection>\n");
+          sb.append("            </UML:Association>\n");
+        }
       }
-      sb.append("    </connectors>\n");
-    }
 
-    // Diagrama con geometría exacta para Enterprise Architect
-    sb.append("    <diagrams>\n");
-    sb.append("      <diagram xmi:id=\"ea_diag_").append(diagram.getId()).append("\">\n");
-    sb.append("        <model package=\"model_").append(diagram.getId())
-      .append("\" localID=\"1\" type=\"Logical\" name=\"").append(escapeXml(diagram.getNombre())).append("\"/>\n");
-    sb.append("        <properties name=\"").append(escapeXml(diagram.getNombre())).append("\" type=\"Logical\"/>\n");
-    sb.append("        <project author=\"Herramienta CASE\" version=\"1.0\" created=\"2026-09-22 00:00:00\" modified=\"2026-09-22 00:00:00\"/>\n");
-    sb.append("        <elements>\n");
+      sb.append("          </UML:Namespace.ownedElement>\n");
+      sb.append("        </UML:Package>\n");
+      sb.append("      </UML:Namespace.ownedElement>\n");
+      sb.append("    </UML:Model>\n");
 
-    int seq = 1;
-    for (ElementoUML el : elements) {
-      int left = Math.max(30, (int) Math.round(el.getPosicionX()));
-      int top = Math.max(30, (int) Math.round(el.getPosicionY()));
-      int width = 200;
-      int attrCount = 0;
-      int methodCount = 0;
-      JsonNode root = propsMap.get(el.getId());
-      if (root != null) {
-        attrCount = root.path("attributes").size();
-        methodCount = root.path("methods").size();
+      // 3. Elemento Diagrama nativo de Enterprise Architect vinculado al Package mediante owner y taggedValue
+      sb.append("    <UML:Diagram name=\"").append(escapeXml(diagram.getNombre()))
+        .append("\" xmi.id=\"").append(diagGuid)
+        .append("\" diagramType=\"ClassDiagram\" owner=\"").append(pkgGuid)
+        .append("\" toolName=\"Enterprise Architect 2.5\">\n");
+      sb.append("      <UML:ModelElement.taggedValue>\n");
+      sb.append("        <UML:TaggedValue tag=\"version\" value=\"1.0\"/>\n");
+      sb.append("        <UML:TaggedValue tag=\"package\" value=\"").append(pkgGuid).append("\"/>\n");
+      sb.append("        <UML:TaggedValue tag=\"type\" value=\"Logical\"/>\n");
+      sb.append("        <UML:TaggedValue tag=\"swimlanes\" value=\"locked=false;orientation=0;width=0;inbar=false;names=false;color=-1;bold=false;fcol=0;tcol=-1;ofCol=-1;ufCol=-1;hl=1;ufh=0;hh=0;cls=0;bw=0;hli=0;SwimlaneFont=lfh:-13,lfw:0,lfi:0,lfu:0,lfs:0,lfface:Calibri,lfe:0,lfo:0,lfchar:1,lfop:0,lfcp:0,lfq:0,lfpf=0,lfWidth=0;\"/>\n");
+      sb.append("        <UML:TaggedValue tag=\"matrixitems\" value=\"locked=false;matrixactive=false;swimlanesactive=true;kanbanactive=false;width=1;clrLine=0;\"/>\n");
+      sb.append("        <UML:TaggedValue tag=\"EAStyle\" value=\"ShowPrivate=1;ShowProtected=1;ShowPublic=1;HideRelationships=0;Locked=0;Border=1;HighlightForeign=1;PackageContents=1;SequenceNotes=0;ScalePrintImage=0;PPgs.cx=0;PPgs.cy=0;DocSize.cx=800;DocSize.cy=1100;ShowDetails=0;Orientation=P;Zoom=100;ShowTags=0;OpParams=1;VisibleAttributeDetail=0;ShowOpRetType=1;ShowIcons=1;CollabNums=0;HideProps=0;ShowReqs=0;ShowCons=0;PaperSize=9;HideParents=0;UseAlias=0;HideAtts=0;HideOps=0;HideStereo=0;HideElemStereo=0;ShowTests=0;ShowMaint=0;ConnectorNotation=UML 2.1;ExplicitNavigability=0;ShowShape=1;AllDockable=0;AdvancedElementProps=1;AdvancedFeatureProps=1;AdvancedConnectorProps=1;m_bElementClassifier=1;SPT=1;ShowNotes=0;SuppressBrackets=0;SuppConnectorLabels=0;PrintPageHeadFoot=0;ShowAsList=0;\"/>\n");
+      sb.append("        <UML:TaggedValue tag=\"styleex\" value=\"ExcludeRTF=0;DocAll=0;HideQuals=0;AttPkg=1;ShowTests=0;ShowMaint=0;SuppressFOC=1;MatrixActive=0;SwimlanesActive=1;KanbanActive=0;MatrixLineWidth=1;MatrixLineClr=0;MatrixLocked=0;TConnectorNotation=UML 2.1;TExplicitNavigability=0;AdvancedElementProps=1;AdvancedFeatureProps=1;AdvancedConnectorProps=1;m_bElementClassifier=1;SPT=1;MDGDgm=;STBLDgm=;ShowNotes=0;VisibleAttributeDetail=0;ShowOpRetType=1;SuppressBrackets=0;SuppConnectorLabels=0;PrintPageHeadFoot=0;ShowAsList=0;SuppressedCompartments=;Theme=:119;\"/>\n");
+      sb.append("      </UML:ModelElement.taggedValue>\n");
+
+      sb.append("      <UML:Diagram.element>\n");
+      int seq = 1;
+      for (ElementoUML el : elements) {
+        String elGuid = "EAID_" + el.getId().toString().replace("-", "_").toUpperCase();
+        int left = Math.max(30, (int) Math.round(el.getPosicionX()));
+        int top = Math.max(30, (int) Math.round(el.getPosicionY()));
+        int width = 200;
+        int attrCount = 0;
+        int methodCount = 0;
+        JsonNode root = propsMap.get(el.getId());
+        if (root != null) {
+          attrCount = root.path("attributes").size();
+          methodCount = root.path("methods").size();
+        }
+        int height = Math.max(110, 50 + (attrCount * 22) + (methodCount * 22));
+        int right = left + width;
+        int bottom = top + height;
+        String duid = UUID.randomUUID().toString().replace("-", "").substring(0, 8).toUpperCase();
+
+        sb.append("        <UML:DiagramElement geometry=\"Left=").append(left)
+          .append(";Top=").append(top)
+          .append(";Right=").append(right)
+          .append(";Bottom=").append(bottom)
+          .append(";\" subject=\"").append(elGuid)
+          .append("\" seqno=\"").append(seq)
+          .append("\" style=\"DUID=").append(duid).append(";\"/>\n");
+        seq++;
       }
-      int height = Math.max(110, 50 + (attrCount * 22) + (methodCount * 22));
-      int right = left + width;
-      int bottom = top + height;
-      String duid = UUID.randomUUID().toString().replace("-", "").substring(0, 8).toUpperCase();
 
-      sb.append("          <element subject=\"el_").append(el.getId())
-        .append("\" geometry=\"Left=").append(left)
-        .append(";Top=").append(top)
-        .append(";Right=").append(right)
-        .append(";Bottom=").append(bottom)
-        .append(";\" seqno=\"").append(seq)
-        .append("\" style=\"DUID=").append(duid).append(";\"/>\n");
-      seq++;
+      for (RelacionUML rel : relations) {
+        if (rel.getElementoOrigen() == null || rel.getElementoDestino() == null) continue;
+        String relGuid = "EAID_" + rel.getId().toString().replace("-", "_").toUpperCase();
+        sb.append("        <UML:DiagramElement geometry=\"SX=0;SY=0;EX=0;EY=0;Path=;\" subject=\"").append(relGuid).append("\" style=\";Hidden=0;\"/>\n");
+      }
+
+      sb.append("      </UML:Diagram.element>\n");
+      sb.append("    </UML:Diagram>\n");
+      sb.append("  </XMI.content>\n");
+      sb.append("  <XMI.difference/>\n");
+      sb.append("  <XMI.extensions xmi.extender=\"Enterprise Architect 2.5\">\n");
+      sb.append("    <EAModel.paramSub/>\n");
+      sb.append("  </XMI.extensions>\n");
+      appendEnterpriseArchitectConnectors(sb, relations);
+      sb.append("</XMI>\n");
+
+      return sb.toString();
+  }
+
+  private void appendDependency(StringBuilder sb, RelacionUML rel, String relGuid,
+                                String origGuid, String destGuid, String origName,
+                                String destName, String relName) {
+    sb.append("            <UML:Dependency xmi.id=\"").append(relGuid)
+        .append("\" client=\"").append(origGuid)
+        .append("\" supplier=\"").append(destGuid)
+        .append("\" visibility=\"public\">\n");
+    appendRelationTaggedValues(sb, "Dependency", "Source -> Destination", origName, destName, relName);
+    sb.append("            </UML:Dependency>\n");
+  }
+
+  private void appendRealization(StringBuilder sb, RelacionUML rel, String relGuid,
+                                 String origGuid, String destGuid, String origName,
+                                 String destName, String relName) {
+    // UML 1.3 models realization as an Abstraction; the EA type tag makes the
+    // intended connector explicit for tools that import the EA extension.
+    sb.append("            <UML:Abstraction xmi.id=\"").append(relGuid)
+        .append("\" client=\"").append(origGuid)
+        .append("\" supplier=\"").append(destGuid)
+        .append("\" visibility=\"public\">\n");
+    appendRelationTaggedValues(sb, "Realization", "Source -> Destination", origName, destName, relName);
+    sb.append("            </UML:Abstraction>\n");
+  }
+
+  private void appendRelationTaggedValues(StringBuilder sb, String eaType, String direction,
+                                          String origName, String destName, String relName) {
+    sb.append("              <UML:ModelElement.taggedValue>\n")
+        .append("                <UML:TaggedValue tag=\"style\" value=\"3\"/>\n")
+        .append("                <UML:TaggedValue tag=\"ea_type\" value=\"").append(eaType).append("\"/>\n")
+        .append("                <UML:TaggedValue tag=\"direction\" value=\"").append(escapeXml(direction)).append("\"/>\n")
+        .append("                <UML:TaggedValue tag=\"linemode\" value=\"3\"/>\n")
+        .append("                <UML:TaggedValue tag=\"ea_sourceName\" value=\"").append(escapeXml(origName)).append("\"/>\n")
+        .append("                <UML:TaggedValue tag=\"ea_targetName\" value=\"").append(escapeXml(destName)).append("\"/>\n")
+        .append("                <UML:TaggedValue tag=\"ea_sourceType\" value=\"Class\"/>\n")
+        .append("                <UML:TaggedValue tag=\"ea_targetType\" value=\"Class\"/>\n")
+        .append("                <UML:TaggedValue tag=\"mt\" value=\"").append(escapeXml(relName)).append("\"/>\n")
+        .append("              </UML:ModelElement.taggedValue>\n");
+  }
+
+  private void appendEnterpriseArchitectConnectors(StringBuilder sb, List<RelacionUML> relations) {
+    sb.append("  <xmi:Extension extender=\"Enterprise Architect\">\n")
+        .append("    <connectors>\n");
+    for (RelacionUML rel : relations) {
+      if (rel.getElementoOrigen() == null || rel.getElementoDestino() == null) continue;
+      String relGuid = "EAID_" + rel.getId().toString().replace("-", "_").toUpperCase();
+      String origGuid = "EAID_" + rel.getElementoOrigen().getId().toString().replace("-", "_").toUpperCase();
+      String destGuid = "EAID_" + rel.getElementoDestino().getId().toString().replace("-", "_").toUpperCase();
+      String eaType = switch (rel.getTipoRelacion()) {
+        case HERENCIA -> "Generalization";
+        case COMPOSICION -> "Composition";
+        case AGREGACION -> "Aggregation";
+        case DEPENDENCIA -> "Dependency";
+        case REALIZACION -> "Realization";
+        default -> "Association";
+      };
+      String sourceAggregation = rel.getTipoRelacion() == TipoRelacionUML.COMPOSICION ? "composite" :
+          rel.getTipoRelacion() == TipoRelacionUML.AGREGACION ? "shared" : "none";
+      String sourceMultiplicity = rel.getMultiplicidadOrigen() == null ? "" : rel.getMultiplicidadOrigen();
+      String targetMultiplicity = rel.getMultiplicidadDestino() == null ? "" : rel.getMultiplicidadDestino();
+      String name = rel.getNombreRelacion() == null ? "" : rel.getNombreRelacion();
+      sb.append("      <connector xmi:id=\"").append(relGuid).append("\">\n")
+          .append("        <properties name=\"").append(escapeXml(name)).append("\" ea_type=\"").append(eaType).append("\"/>\n")
+          .append("        <source xmi:idref=\"").append(origGuid).append("\"><type multiplicity=\"").append(escapeXml(sourceMultiplicity))
+          .append("\" aggregation=\"").append(sourceAggregation).append("\"/></source>\n")
+          .append("        <target xmi:idref=\"").append(destGuid).append("\"><type multiplicity=\"").append(escapeXml(targetMultiplicity))
+          .append("\" aggregation=\"none\"/></target>\n")
+          .append("      </connector>\n");
     }
-
-    sb.append("        </elements>\n");
-    sb.append("      </diagram>\n");
-    sb.append("    </diagrams>\n");
-    sb.append("  </xmi:Extension>\n");
-    sb.append("</xmi:XMI>\n");
-
-    return sb.toString();
+    sb.append("    </connectors>\n  </xmi:Extension>\n");
   }
 
   public DiagramFullView importXmi(UUID projectId, UUID diagramId, String email, String xmlContent) {
-    projectService.requireCanEdit(projectId, email);
-    DiagramaClase diagram = validateDiagram(projectId, diagramId);
-
+    umlService.acquireLock(projectId, diagramId, email);
     try {
+      projectService.requireCanEdit(projectId, email);
+      DiagramaClase diagram = validateDiagram(projectId, diagramId);
+
       // 1. Limpiar BOM y normalizar encoding del prólogo XML para evitar fallos de parser con windows-1252 de EA
       String cleanContent = xmlContent;
       if (cleanContent.startsWith("\uFEFF")) {
@@ -445,7 +489,7 @@ public class XmiService {
       Map<String, Element> idrefToExtensionElementMap = new HashMap<>();
 
       for (Element el : allElements) {
-        String id = getAttr(el, "xmi:id", "xmi.id", "id", "xmiId");
+        String id = getAttr(el, "xmi:id", "xmi.id", "id", "xmiId", "guid", "GUID");
         String name = getAttr(el, "name", "Name", "label");
         if (!id.isBlank()) {
           idToDomElementMap.put(id, el);
@@ -466,6 +510,11 @@ public class XmiService {
       Map<String, ElementoUML> idToElementMap = new HashMap<>();
       Map<String, ElementoUML> nameToElementMap = new HashMap<>();
       Set<String> processedClassNames = new HashSet<>();
+      // UML and the EA extension can describe the same relation twice. Use the
+      // relation ID for that duplicate representation, never the endpoint pair:
+      // two valid relations may connect the same classes.
+      Set<String> processedRelationIds = new HashSet<>();
+      Map<String, RelacionUML> importedRelationsById = new HashMap<>();
 
       // Mapear coordenadas de diagramas si existen (Enterprise Architect o herramientas compatibles)
       Map<String, double[]> idToPositionMap = new HashMap<>();
@@ -627,7 +676,6 @@ public class XmiService {
       }
 
       // 5. Tercer paso: Importar Generalizaciones / Herencias (XMI 1.1 y XMI 2.1)
-      Set<String> processedInheritances = new HashSet<>();
       for (Element el : allElements) {
         String local = getLocalName(el);
         String type = getAttr(el, "xmi:type", "type");
@@ -657,9 +705,8 @@ public class XmiService {
           ElementoUML parentEl = resolveElement(parentId, idToElementMap, nameToElementMap);
 
           if (childEl != null && parentEl != null && !childEl.getId().equals(parentEl.getId())) {
-            String key = childEl.getId() + "->" + parentEl.getId();
-            if (!processedInheritances.contains(key)) {
-              processedInheritances.add(key);
+            String relationId = getRelationImportKey(el);
+            if (processedRelationIds.add(relationId)) {
               String relName = getAttr(el, "name", "Name");
               RelacionUML herencia = new RelacionUML(
                   diagram,
@@ -671,18 +718,33 @@ public class XmiService {
                   null
               );
               relationRepo.save(herencia);
+              importedRelationsById.put(relationId, herencia);
             }
           }
         }
       }
 
       // 6. Cuarto paso: Importar Asociaciones, Composiciones y Agregaciones (EA XMI 1.1 y 2.1)
-      Set<String> processedAssociations = new HashSet<>();
       for (Element el : allElements) {
         String local = getLocalName(el);
         String type = getAttr(el, "xmi:type", "type");
 
-        if ("Association".equalsIgnoreCase(local) || type.toLowerCase().endsWith("association")) {
+        if ("Abstraction".equalsIgnoreCase(local) || "Realization".equalsIgnoreCase(local)
+            || type.toLowerCase().endsWith("abstraction") || type.toLowerCase().endsWith("realization")) {
+          String relationId = getRelationImportKey(el);
+          String clientRef = getAttr(el, "client", "source", "specific");
+          String supplierRef = getAttr(el, "supplier", "target", "general");
+          ElementoUML origEl = resolveElement(clientRef, idToElementMap, nameToElementMap);
+          ElementoUML destEl = resolveElement(supplierRef, idToElementMap, nameToElementMap);
+          if (origEl != null && destEl != null && processedRelationIds.add(relationId)) {
+            String relName = getAttr(el, "name", "Name");
+            RelacionUML realizacion = new RelacionUML(
+                diagram, origEl, destEl, relName.isBlank() ? null : relName,
+                normalizeImportedRelationType(TipoRelacionUML.REALIZACION), null, null);
+            relationRepo.save(realizacion);
+            importedRelationsById.put(relationId, realizacion);
+          }
+        } else if ("Association".equalsIgnoreCase(local) || type.toLowerCase().endsWith("association")) {
           String relName = getAttr(el, "name", "Name");
 
           // Buscar los extremos de la asociación
@@ -715,18 +777,14 @@ public class XmiService {
             ElementoUML destEl = resolveElement(end2Ref, idToElementMap, nameToElementMap);
 
             if (origEl != null && destEl != null) {
-              String key = origEl.getId().compareTo(destEl.getId()) <= 0
-                  ? origEl.getId() + "_" + destEl.getId()
-                  : destEl.getId() + "_" + origEl.getId();
-
-              if (!processedAssociations.contains(key) || !relName.isBlank()) {
-                processedAssociations.add(key);
+              String relationId = getRelationImportKey(el);
+              if (processedRelationIds.add(relationId)) {
 
                 String multOrig = extractMultiplicityFromEnd(end1);
                 String multDest = extractMultiplicityFromEnd(end2);
 
-                String agg1 = getAttr(end1, "aggregation").toLowerCase();
-                String agg2 = getAttr(end2, "aggregation").toLowerCase();
+                String agg1 = extractAggregationFromEnd(end1);
+                String agg2 = extractAggregationFromEnd(end2);
 
                 TipoRelacionUML tipoRel = TipoRelacionUML.ASOCIACION;
                 if (agg1.contains("comp") || agg2.contains("comp")) {
@@ -745,6 +803,100 @@ public class XmiService {
                     multDest.isBlank() ? null : multDest
                 );
                 relationRepo.save(relacion);
+                importedRelationsById.put(relationId, relacion);
+              }
+            }
+          }
+        } else if ("Dependency".equalsIgnoreCase(local) || type.toLowerCase().endsWith("dependency")) {
+          String relName = getAttr(el, "name", "Name");
+          String clientRef = getAttr(el, "client", "source");
+          String supplierRef = getAttr(el, "supplier", "target");
+          ElementoUML origEl = resolveElement(clientRef, idToElementMap, nameToElementMap);
+          ElementoUML destEl = resolveElement(supplierRef, idToElementMap, nameToElementMap);
+          String relationId = getRelationImportKey(el);
+          if (origEl != null && destEl != null && processedRelationIds.add(relationId)) {
+              RelacionUML dep = new RelacionUML(diagram, origEl, destEl,
+                  relName.isBlank() ? null : relName, TipoRelacionUML.DEPENDENCIA, null, null);
+              relationRepo.save(dep);
+              importedRelationsById.put(relationId, dep);
+          }
+        } else if ("connector".equalsIgnoreCase(local)) {
+          // Parsear conectores de Enterprise Architect (<connector>)
+          String relName = "";
+          String eaType = "";
+          List<Element> props = findChildElementsByTagNames(el, "properties");
+          if (!props.isEmpty()) {
+            relName = getAttr(props.get(0), "name", "Name");
+            eaType = getAttr(props.get(0), "ea_type", "eaType");
+          }
+
+          Element sourceEl = null;
+          Element targetEl = null;
+          List<Element> sources = findChildElementsByTagNames(el, "source");
+          if (!sources.isEmpty()) sourceEl = sources.get(0);
+          List<Element> targets = findChildElementsByTagNames(el, "target");
+          if (!targets.isEmpty()) targetEl = targets.get(0);
+
+          if (sourceEl != null && targetEl != null) {
+            String srcRef = getAttr(sourceEl, "xmi:idref", "xmi.idref", "idref");
+            String tgtRef = getAttr(targetEl, "xmi:idref", "xmi.idref", "idref");
+
+            ElementoUML origEl = resolveElement(srcRef, idToElementMap, nameToElementMap);
+            ElementoUML destEl = resolveElement(tgtRef, idToElementMap, nameToElementMap);
+
+            if (origEl != null && destEl != null) {
+              String multOrig = "";
+              String aggOrig = "";
+              List<Element> srcTypes = findChildElementsByTagNames(sourceEl, "type");
+              if (!srcTypes.isEmpty()) {
+                multOrig = getAttr(srcTypes.get(0), "multiplicity", "Multiplicity");
+                aggOrig = extractAggregationFromEnd(srcTypes.get(0));
+              }
+
+              String multDest = "";
+              String aggDest = "";
+              List<Element> tgtTypes = findChildElementsByTagNames(targetEl, "type");
+              if (!tgtTypes.isEmpty()) {
+                multDest = getAttr(tgtTypes.get(0), "multiplicity", "Multiplicity");
+                aggDest = extractAggregationFromEnd(tgtTypes.get(0));
+              }
+
+              TipoRelacionUML tipoRel = TipoRelacionUML.ASOCIACION;
+              if ("Generalization".equalsIgnoreCase(eaType)) {
+                tipoRel = TipoRelacionUML.HERENCIA;
+              } else if ("Aggregation".equalsIgnoreCase(eaType) || aggOrig.contains("shared") || aggDest.contains("shared")) {
+                tipoRel = TipoRelacionUML.AGREGACION;
+              } else if ("Composition".equalsIgnoreCase(eaType) || aggOrig.contains("composite") || aggDest.contains("composite")) {
+                tipoRel = TipoRelacionUML.COMPOSICION;
+              } else if ("Dependency".equalsIgnoreCase(eaType)) {
+                tipoRel = TipoRelacionUML.DEPENDENCIA;
+              } else if ("Realization".equalsIgnoreCase(eaType) || "Realisation".equalsIgnoreCase(eaType)) {
+                tipoRel = normalizeImportedRelationType(TipoRelacionUML.REALIZACION);
+              }
+
+              String relationId = getRelationImportKey(el);
+              if (processedRelationIds.add(relationId)) {
+                RelacionUML relacion = new RelacionUML(
+                    diagram,
+                    origEl,
+                    destEl,
+                    relName.isBlank() ? null : relName,
+                    tipoRel,
+                    multOrig.isBlank() ? null : multOrig,
+                    multDest.isBlank() ? null : multDest
+                );
+                relationRepo.save(relacion);
+                importedRelationsById.put(relationId, relacion);
+              } else if ((TipoRelacionUML.AGREGACION == tipoRel || TipoRelacionUML.COMPOSICION == tipoRel)
+                  && importedRelationsById.containsKey(relationId)) {
+                // EA may expose the same relation first as UML:Association and
+                // then as a connector carrying the authoritative aggregation.
+                RelacionUML imported = importedRelationsById.get(relationId);
+                if (imported.getTipoRelacion() == TipoRelacionUML.ASOCIACION) {
+                  imported.update(imported.getNombreRelacion(), tipoRel,
+                      imported.getMultiplicidadOrigen(), imported.getMultiplicidadDestino());
+                  relationRepo.save(imported);
+                }
               }
             }
           }
@@ -756,6 +908,8 @@ public class XmiService {
 
     } catch (Exception e) {
       throw new BadRequestException("Error al parsear el archivo XMI: " + e.getMessage());
+    } finally {
+      umlService.releaseLock(projectId, diagramId, email);
     }
   }
 
@@ -909,6 +1063,25 @@ public class XmiService {
     return "";
   }
 
+  private String extractAggregationFromEnd(Element end) {
+    if (end == null) return "";
+
+    String direct = getAttr(end, "aggregation", "Aggregation");
+    if (!direct.isBlank()) return direct.trim().toLowerCase(Locale.ROOT);
+
+    List<Element> aggregationNodes = findDescendantElementsByTagNames(
+        end, "aggregation", "AssociationEnd.aggregation", "Foundation.Core.AssociationEnd.aggregation",
+        "AggregationKind");
+    for (Element node : aggregationNodes) {
+      String value = getAttr(node, "xmi.value", "xmi:value", "value", "Value");
+      if (value.isBlank()) {
+        value = node.getTextContent() == null ? "" : node.getTextContent().trim();
+      }
+      if (!value.isBlank()) return value.toLowerCase(Locale.ROOT);
+    }
+    return "";
+  }
+
   private void collectAllElements(org.w3c.dom.Node node, List<Element> result) {
     if (node == null) return;
     if (node.getNodeType() == org.w3c.dom.Node.ELEMENT_NODE) {
@@ -1031,9 +1204,15 @@ public class XmiService {
 
     // Descartar si el nombre es una clase raíz de EA o un tipo primitivo conocido
     String name = getAttr(el, "name", "Name");
-    if (!name.isBlank() && isPrimitiveOrSystemElement(name)) {
-      return false;
-    }
+        if (!name.isBlank() && isPrimitiveOrSystemElement(name)) {
+          return false;
+        }
+        // EA may export auxiliary extension records as Class/Table nodes.
+        // They are metadata, not UML elements of the user diagram.
+        String normalizedName = name.trim().toLowerCase(Locale.ROOT);
+        if (normalizedName.equals("extension_table") || normalizedName.equals("extension_enumeration")) {
+          return false;
+        }
 
     // Aceptación directa por nombre de etiqueta o tipo
     if (local.equalsIgnoreCase("Class") || local.equalsIgnoreCase("Table")
@@ -1123,7 +1302,7 @@ public class XmiService {
   private String resolveAttributeType(Element attrEl, Map<String, String> idToNameMap) {
     // 1. Tipo en atributo directo
     String typeAttr = getAttr(attrEl, "type", "typeRef", "datatype");
-    if (!typeAttr.isBlank()) {
+    if (!typeAttr.isBlank() && !isGenericAttributeType(typeAttr)) {
       if (idToNameMap.containsKey(typeAttr)) {
         return cleanTypeName(idToNameMap.get(typeAttr));
       }
@@ -1132,8 +1311,19 @@ public class XmiService {
 
     // 2. Tipo en nodo hijo o propiedades de EA
     List<Element> typeNodes = findDescendantElementsByTagNames(attrEl,
-        "type", "Classifier", "DataType", "PrimitiveType", "StructuralFeature.type", "properties", "property");
+        "type", "Classifier", "DataType", "PrimitiveType", "StructuralFeature.type", "properties", "property", "TaggedValue", "taggedValue");
     for (Element tn : typeNodes) {
+      String tag = getAttr(tn, "tag", "name", "key");
+      String taggedValue = getAttr(tn, "value", "Value", "dataValue", "DataValue");
+      if (tag.equalsIgnoreCase("type") || tag.equalsIgnoreCase("datatype") || tag.equalsIgnoreCase("sqltype")) {
+        if (!taggedValue.isBlank() && !isGenericAttributeType(taggedValue)) {
+          return cleanTypeName(taggedValue);
+        }
+        String text = tn.getTextContent() == null ? "" : tn.getTextContent().trim();
+        if (!text.isBlank() && !isGenericAttributeType(text)) {
+          return cleanTypeName(text);
+        }
+      }
       String ref = getAttr(tn, "xmi:idref", "xmi.idref", "idref");
       if (!ref.isBlank() && idToNameMap.containsKey(ref)) {
         return cleanTypeName(idToNameMap.get(ref));
@@ -1156,6 +1346,13 @@ public class XmiService {
     }
 
     return "String";
+  }
+
+  private boolean isGenericAttributeType(String value) {
+    if (value == null || value.isBlank()) return true;
+    String normalized = value.trim().toLowerCase(Locale.ROOT);
+    return normalized.equals("property") || normalized.equals("attribute")
+        || normalized.equals("ownedattribute") || normalized.equals("uml:property");
   }
 
   private String cleanTypeName(String raw) {
@@ -1198,6 +1395,17 @@ public class XmiService {
       }
       if (left >= 0 && top >= 0) {
         return new double[]{left, top};
+      }
+
+      // EA also exports geometry as x,y,width,height (or x,y,right,bottom).
+      // React Flow only needs the original upper-left position here.
+      String[] compact = geom.split(",");
+      if (compact.length >= 2) {
+        double x = Double.parseDouble(compact[0].trim());
+        double y = Double.parseDouble(compact[1].trim());
+        if (Double.isFinite(x) && Double.isFinite(y)) {
+          return new double[]{Math.abs(x), Math.abs(y)};
+        }
       }
     } catch (Exception ignored) {}
     return null;
@@ -1244,6 +1452,95 @@ public class XmiService {
     }
     if (s.equals("*")) return new String[]{"0", "*"};
     return new String[]{s, s};
+  }
+
+  private String getRelationImportKey(Element relation) {
+    String id = getAttr(relation, "xmi:id", "xmi.id", "id", "xmiId", "xmi:idref", "xmi.idref", "idref",
+        "connectorID", "connectorId", "guid", "GUID");
+    if (!id.isBlank()) return id;
+
+    // Fallback only for malformed exports without a relation identifier. It
+    // includes semantic data beyond the endpoints so parallel relation types
+    // are not collapsed merely because they connect the same two elements.
+    String local = getLocalName(relation).toLowerCase(Locale.ROOT);
+    String name = getAttr(relation, "name", "Name");
+    String client = getAttr(relation, "client", "source", "specific", "general");
+    String supplier = getAttr(relation, "supplier", "target", "general", "specific");
+    if (client.isBlank() || supplier.isBlank()) {
+      List<Element> sources = findDescendantElementsByTagNames(relation, "source");
+      List<Element> targets = findDescendantElementsByTagNames(relation, "target");
+      if (!sources.isEmpty()) client = getAttr(sources.get(0), "xmi:idref", "xmi.idref", "idref", "type");
+      if (!targets.isEmpty()) supplier = getAttr(targets.get(0), "xmi:idref", "xmi.idref", "idref", "type");
+    }
+    if (client.isBlank() || supplier.isBlank()) {
+      List<Element> ends = findDescendantElementsByTagNames(relation, "ownedEnd", "AssociationEnd");
+      if (ends.size() >= 2) {
+        client = getAttr(ends.get(0), "type", "participant");
+        supplier = getAttr(ends.get(1), "type", "participant");
+      }
+    }
+    if (client.isBlank() || supplier.isBlank()) {
+      List<Element> participants = findDescendantElementsByTagNames(relation, "Classifier", "Class");
+      if (participants.size() >= 2) {
+        client = getAttr(participants.get(0), "xmi:idref", "xmi.idref", "idref", "type");
+        supplier = getAttr(participants.get(1), "xmi:idref", "xmi.idref", "idref", "type");
+      }
+    }
+    String eaType = getAttr(relation, "ea_type", "eaType", "type");
+    if (eaType.isBlank()) {
+      List<Element> tags = findDescendantElementsByTagNames(relation, "TaggedValue", "taggedValue", "properties");
+      for (Element tag : tags) {
+        if (getAttr(tag, "tag", "key").equalsIgnoreCase("ea_type")) {
+          eaType = getAttr(tag, "value", "Value", "dataValue", "DataValue");
+          break;
+        }
+      }
+    }
+    if (eaType.isBlank()) {
+      eaType = switch (local) {
+        case "association" -> "Association";
+        case "generalization" -> "Generalization";
+        case "dependency" -> "Dependency";
+        case "abstraction", "realization" -> "Realization";
+        case "connector" -> "Association";
+        default -> local;
+      };
+    }
+    String multiplicity = getAttr(relation, "multiplicity", "Multiplicity");
+    String aggregation = getAttr(relation, "aggregation", "Aggregation");
+    return "DOM_RELATION:" + eaType.toLowerCase(Locale.ROOT) + ":" + name + ":" + client + ":" + supplier
+        + ":" + multiplicity + ":" + aggregation;
+  }
+
+  /**
+   * The current database constraint predates the REALIZACION enum value and
+   * only accepts the five original relation types. Keep realization in the
+   * export/model vocabulary, but normalize it before an XMI import is saved.
+   */
+  private TipoRelacionUML normalizeImportedRelationType(TipoRelacionUML type) {
+    return type == TipoRelacionUML.REALIZACION ? TipoRelacionUML.ASOCIACION : type;
+  }
+
+  private String[] parseMultiplicityBoundsUpperLower(String mult) {
+    if (mult == null || mult.isBlank()) return new String[]{"1", "1"};
+    String s = mult.trim();
+    String lower = "1";
+    String upper = "1";
+    if (s.contains("..")) {
+      String[] parts = s.split("\\.\\.");
+      lower = parts[0].trim();
+      upper = parts[1].trim();
+    } else if (s.equals("*")) {
+      lower = "0";
+      upper = "*";
+    } else {
+      lower = s;
+      upper = s;
+    }
+    if ("*".equals(upper)) {
+      upper = "-1";
+    }
+    return new String[]{lower, upper};
   }
 
   private DiagramaClase validateDiagram(UUID projectId, UUID diagramId) {

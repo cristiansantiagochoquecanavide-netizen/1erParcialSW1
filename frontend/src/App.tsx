@@ -7,17 +7,47 @@ type Member = { id: string; userId: string; name: string; email: string; role: R
 type Auth = { token: string; name: string; email: string }
 const base = import.meta.env.VITE_API_BASE_URL !== undefined ? import.meta.env.VITE_API_BASE_URL : ''
 
+function readStoredAuth(): Auth | null {
+  try {
+    const raw = localStorage.getItem('case.auth')
+    if (!raw) return null
+    const value = JSON.parse(raw) as Partial<Auth>
+    if (typeof value.token !== 'string' || !value.token || typeof value.name !== 'string' || typeof value.email !== 'string') {
+      localStorage.removeItem('case.auth')
+      return null
+    }
+    return { token: value.token, name: value.name, email: value.email }
+  } catch {
+    localStorage.removeItem('case.auth')
+    return null
+  }
+}
+
 async function api<T>(path: string, token?: string, options: RequestInit = {}): Promise<T> {
   const url = base ? `${base}${path}` : path
   const response = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers } })
-  if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.message ?? 'No se pudo completar la operación.') }
+  if (!response.ok) {
+    const raw = await response.text()
+    let message = ''
+    try { message = (JSON.parse(raw) as { message?: string }).message ?? '' } catch { message = raw.trim() }
+    if (response.status === 401 || response.status === 403) {
+      localStorage.removeItem('case.auth')
+      window.dispatchEvent(new Event('case:unauthorized'))
+    }
+    throw new Error(message || `No se pudo completar la operación (${response.status}).`)
+  }
   return response.status === 204 ? undefined as T : response.json() as Promise<T>
 }
 
 export default function App() {
-  const [auth, setAuth] = useState<Auth | null>(() => { const raw = localStorage.getItem('case.auth'); return raw ? JSON.parse(raw) : null })
+  const [auth, setAuth] = useState<Auth | null>(readStoredAuth)
   const [registering, setRegistering] = useState(false), [projects, setProjects] = useState<Project[]>([]), [selected, setSelected] = useState<Project | null>(null), [message, setMessage] = useState<string | null>(null)
   const error = useCallback((value: unknown) => setMessage(value instanceof Error ? value.message : 'Error inesperado.'), [])
+  useEffect(() => {
+    const logout = () => { setAuth(null); setSelected(null); setProjects([]); setMessage('Tu sesión expiró. Ingresa nuevamente.') }
+    window.addEventListener('case:unauthorized', logout)
+    return () => window.removeEventListener('case:unauthorized', logout)
+  }, [])
   const load = () => auth && api<Project[]>('/api/projects', auth.token).then(setProjects).catch(error)
   useEffect(() => { load() }, [auth]) // eslint-disable-line react-hooks/exhaustive-deps
   if (!auth) return <AuthScreen registering={registering} setRegistering={setRegistering} onAuth={value => { localStorage.setItem('case.auth', JSON.stringify(value)); setAuth(value) }} onError={error} message={message} />
@@ -47,8 +77,18 @@ export default function App() {
 }
 
 function AuthScreen({ registering, setRegistering, onAuth, onError, message }: { registering: boolean; setRegistering: (v: boolean) => void; onAuth: (v: Auth) => void; onError: (e: unknown) => void; message: string | null }) {
-  async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const f = new FormData(event.currentTarget); try { onAuth(await api<Auth>(registering ? '/api/auth/register' : '/api/auth/login', undefined, { method: 'POST', body: JSON.stringify({ email: f.get('email'), password: f.get('password'), ...(registering ? { name: f.get('name') } : {}) }) })) } catch (e) { onError(e) } }
-  return <main className="auth"><section className="card"><h1>Proyecto CASE</h1><p>{registering ? 'Crea tu cuenta para iniciar un espacio de modelado.' : 'Ingresa a tus proyectos de modelado.'}</p>{message && <p className="error">{message}</p>}<form onSubmit={submit}>{registering && <input name="name" placeholder="Nombre" required maxLength={100} />}<input name="email" type="email" placeholder="Correo" required /><input name="password" type="password" placeholder="Contraseña (mínimo 8 caracteres)" required minLength={8} /><button>{registering ? 'Registrarme' : 'Iniciar sesión'}</button></form><button className="link" onClick={() => setRegistering(!registering)}>{registering ? 'Ya tengo una cuenta' : 'Crear una cuenta'}</button></section></main>
+  const [submitting, setSubmitting] = useState(false)
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const f = new FormData(event.currentTarget)
+    setSubmitting(true)
+    try {
+      const value = await api<Auth>(registering ? '/api/auth/register' : '/api/auth/login', undefined, { method: 'POST', body: JSON.stringify({ email: f.get('email'), password: f.get('password'), ...(registering ? { name: f.get('name') } : {}) }) })
+      localStorage.setItem('case.auth', JSON.stringify(value))
+      onAuth(value)
+    } catch (e) { onError(e) } finally { setSubmitting(false) }
+  }
+  return <main className="auth"><section className="card"><h1>Proyecto CASE</h1><p>{registering ? 'Crea tu cuenta para iniciar un espacio de modelado.' : 'Ingresa a tus proyectos de modelado.'}</p>{message && <p className="error">{message}</p>}<form onSubmit={submit}>{registering && <input name="name" placeholder="Nombre" required maxLength={100} />}<input name="email" type="email" placeholder="Correo" autoComplete="email" required /><input name="password" type="password" placeholder="Contraseña (mínimo 8 caracteres)" autoComplete={registering ? 'new-password' : 'current-password'} required minLength={8} /><button disabled={submitting}>{submitting ? 'Procesando…' : registering ? 'Registrarme' : 'Iniciar sesión'}</button></form><button type="button" className="link" onClick={() => setRegistering(!registering)} disabled={submitting}>{registering ? 'Ya tengo una cuenta' : 'Crear una cuenta'}</button></section></main>
 }
 
 function Workspace({ project, auth, onBack, onError }: { project: Project; auth: Auth; onBack: () => void; onError: (e: unknown) => void }) {
@@ -108,7 +148,7 @@ function Workspace({ project, auth, onBack, onError }: { project: Project; auth:
         </section>
       )}
 
-      <UmlCanvas project={project} auth={auth} onError={onError} />
+      <UmlCanvas project={project} auth={auth} onError={onError} members={members} onManageMembers={() => setShowMembers(value => !value)} onBack={onBack} />
     </main>
   )
 }

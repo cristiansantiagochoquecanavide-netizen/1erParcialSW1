@@ -237,6 +237,53 @@ class XmiServiceTest {
   }
 
   @Test
+  void exportXmi_preservesRelationTypesRecursiveAndParallelRelations() {
+    ElementoUML interfaz = new ElementoUML(
+        diagram, TipoElementoUML.INTERFAZ, "IProcesable", 650.0, 100.0, "{}");
+    ReflectionTestUtils.setField(interfaz, "id", UUID.fromString("55555555-5555-5555-5555-555555555555"));
+    ElementoUML abstracta = new ElementoUML(
+        diagram, TipoElementoUML.CLASE_ABSTRACTA, "Persona", 650.0, 350.0, "{}");
+    ReflectionTestUtils.setField(abstracta, "id", UUID.fromString("66666666-6666-6666-6666-666666666666"));
+    ElementoUML enumeracion = new ElementoUML(
+        diagram, TipoElementoUML.ENUMERACION, "MetodoPago", 900.0, 350.0, "{}");
+    ReflectionTestUtils.setField(enumeracion, "id", UUID.fromString("77777777-7777-7777-7777-777777777777"));
+
+    RelacionUML dependencia = new RelacionUML(
+        diagram, pedidoEl, productoEl, "usa", TipoRelacionUML.DEPENDENCIA, null, null);
+    ReflectionTestUtils.setField(dependencia, "id", UUID.fromString("dddddddd-dddd-dddd-dddd-dddddddddddd"));
+    RelacionUML realizacion = new RelacionUML(
+        diagram, pedidoEl, interfaz, "implementa", TipoRelacionUML.REALIZACION, null, null);
+    ReflectionTestUtils.setField(realizacion, "id", UUID.fromString("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"));
+    RelacionUML reflexiva = new RelacionUML(
+        diagram, clienteEl, clienteEl, "se supervisa", TipoRelacionUML.ASOCIACION, "1", "0..*");
+    ReflectionTestUtils.setField(reflexiva, "id", UUID.fromString("ffffffff-ffff-ffff-ffff-ffffffffffff"));
+    RelacionUML paralela = new RelacionUML(
+        diagram, clienteEl, pedidoEl, "segunda", TipoRelacionUML.DEPENDENCIA, null, null);
+    ReflectionTestUtils.setField(paralela, "id", UUID.fromString("12121212-1212-1212-1212-121212121212"));
+
+    when(diagramRepo.findById(diagram.getId())).thenReturn(Optional.of(diagram));
+    when(elementRepo.findByDiagramaId(diagram.getId()))
+        .thenReturn(List.of(clienteEl, pedidoEl, productoEl, detalleEl, interfaz, abstracta, enumeracion));
+    when(relationRepo.findByDiagramaId(diagram.getId()))
+        .thenReturn(List.of(relClientePedido, relPedidoDetalle, relProductoDetalle,
+            dependencia, realizacion, reflexiva, paralela));
+
+    String xmi = service.exportXmi(project.getId(), diagram.getId(), "tester@case.bo");
+
+    assertThat(xmi).contains("xmlns:xmi=\"http://www.omg.org/XMI\"");
+    assertThat(xmi).contains("<UML:Interface name=\"IProcesable\"");
+    assertThat(xmi).contains("<UML:Enumeration name=\"MetodoPago\"");
+    assertThat(xmi).contains("isAbstract=\"true\"");
+    assertThat(xmi).contains("<UML:Dependency");
+    assertThat(xmi).contains("<UML:Abstraction");
+    assertThat(xmi).contains("<xmi:Extension extender=\"Enterprise Architect\">");
+    assertThat(xmi).contains("<connector xmi:id=\"EAID_DDDDDDDD_DDDD_DDDD_DDDD_DDDDDDDDDDDD\"");
+    assertThat(xmi).contains("<connector xmi:id=\"EAID_FFFFFFFF_FFFF_FFFF_FFFF_FFFFFFFFFFFF\"");
+    assertThat(xmi).contains("type=\"EAID_11111111_1111_1111_1111_111111111111\">");
+    assertThat(xmi).contains("ea_type=\"Realization\"");
+  }
+
+  @Test
   void exportAndImportJson_roundTripPreservesCompleteStructure() {
     when(diagramRepo.findById(diagram.getId())).thenReturn(Optional.of(diagram));
     when(elementRepo.findByDiagramaId(diagram.getId())).thenReturn(List.of(clienteEl, pedidoEl, productoEl, detalleEl));
@@ -433,6 +480,91 @@ class XmiServiceTest {
   }
 
   @Test
+  void importXmi_preservesAggregationFromEnterpriseArchitectRepresentations() {
+    UUID destDiagramId = UUID.randomUUID();
+    DiagramaClase destDiagram = new DiagramaClase(project, "EA Aggregation Diagram", "");
+    ReflectionTestUtils.setField(destDiagram, "id", destDiagramId);
+    when(diagramRepo.findById(destDiagramId)).thenReturn(Optional.of(destDiagram));
+
+    List<ElementoUML> savedElements = new ArrayList<>();
+    when(elementRepo.save(any(ElementoUML.class))).thenAnswer(inv -> {
+      ElementoUML element = inv.getArgument(0);
+      ReflectionTestUtils.setField(element, "id", UUID.randomUUID());
+      savedElements.add(element);
+      return element;
+    });
+    List<RelacionUML> savedRelations = new ArrayList<>();
+    when(relationRepo.save(any(RelacionUML.class))).thenAnswer(inv -> {
+      RelacionUML relation = inv.getArgument(0);
+      ReflectionTestUtils.setField(relation, "id", UUID.randomUUID());
+      if (!savedRelations.contains(relation)) savedRelations.add(relation);
+      return relation;
+    });
+    when(umlService.getDiagram(project.getId(), destDiagramId, "tester@case.bo"))
+        .thenReturn(mock(DiagramFullView.class));
+
+    String eaXmi = """
+        <?xml version="1.0"?>
+        <XMI xmi.version="1.1" xmlns:UML="omg.org/UML1.3" xmlns:xmi="http://www.omg.org/XMI">
+          <XMI.content>
+            <UML:Model xmi.id="MODEL_1">
+              <UML:Namespace.ownedElement>
+                <UML:Class xmi.id="EAID_PEDIDO" name="Pedido"/>
+                <UML:Class xmi.id="EAID_DETALLE" name="DetallePedido"/>
+                <UML:Class xmi.id="EAID_CATEGORIA" name="Categoria"/>
+                <UML:Class xmi.id="EAID_PRODUCTO" name="Producto"/>
+                <UML:Association xmi.id="EAID_REL_PEDIDO_DETALLE" name="contiene">
+                  <UML:Association.connection>
+                    <UML:AssociationEnd type="EAID_PEDIDO" aggregation="none">
+                      <UML:AssociationEnd.multiplicity><UML:MultiplicityRange lower="1" upper="1"/></UML:AssociationEnd.multiplicity>
+                    </UML:AssociationEnd>
+                    <UML:AssociationEnd type="EAID_DETALLE">
+                      <UML:AssociationEnd.multiplicity><UML:MultiplicityRange lower="0" upper="-1"/></UML:AssociationEnd.multiplicity>
+                    </UML:AssociationEnd>
+                  </UML:Association.connection>
+                </UML:Association>
+                <UML:Association xmi.id="EAID_REL_CATEGORIA_PRODUCTO" name="clasifica">
+                  <UML:Association.connection>
+                    <UML:AssociationEnd type="EAID_CATEGORIA" aggregation="shared">
+                      <UML:AssociationEnd.multiplicity><UML:MultiplicityRange lower="1" upper="1"/></UML:AssociationEnd.multiplicity>
+                    </UML:AssociationEnd>
+                    <UML:AssociationEnd type="EAID_PRODUCTO">
+                      <UML:AssociationEnd.multiplicity><UML:MultiplicityRange lower="0" upper="-1"/></UML:AssociationEnd.multiplicity>
+                    </UML:AssociationEnd>
+                  </UML:Association.connection>
+                </UML:Association>
+              </UML:Namespace.ownedElement>
+            </UML:Model>
+          </XMI.content>
+          <xmi:Extension extender="Enterprise Architect">
+            <connectors>
+              <connector xmi:idref="EAID_REL_PEDIDO_DETALLE">
+                <source xmi:idref="EAID_PEDIDO"><type multiplicity="1" aggregation="none"/></source>
+                <target xmi:idref="EAID_DETALLE"><type multiplicity="0..*" aggregation="none"/></target>
+                <properties ea_type="Aggregation" subtype="2" direction="Destination -> Source"/>
+              </connector>
+            </connectors>
+          </xmi:Extension>
+        </XMI>
+        """;
+
+    service.importXmi(project.getId(), destDiagramId, "tester@case.bo", eaXmi);
+
+    assertThat(savedElements).extracting(ElementoUML::getNombre)
+        .containsExactlyInAnyOrder("Pedido", "DetallePedido", "Categoria", "Producto");
+    assertThat(savedRelations).hasSize(2);
+    assertThat(savedRelations).allMatch(r -> r.getTipoRelacion() == TipoRelacionUML.AGREGACION);
+    assertThat(savedRelations).anyMatch(r -> r.getElementoOrigen().getNombre().equals("Pedido")
+        && r.getElementoDestino().getNombre().equals("DetallePedido")
+        && r.getMultiplicidadOrigen().equals("1")
+        && r.getMultiplicidadDestino().equals("0..*"));
+    assertThat(savedRelations).anyMatch(r -> r.getElementoOrigen().getNombre().equals("Categoria")
+        && r.getElementoDestino().getNombre().equals("Producto")
+        && r.getMultiplicidadOrigen().equals("1")
+        && r.getMultiplicidadDestino().equals("0..*"));
+  }
+
+  @Test
   void exportXmi_withClienteReservaSucursal_exportsEnterpriseArchitectTypesAndDiagramGeometry() {
     // Diagrama exactamente como el del usuario: Cliente, Reserva, Sucursal con tipos Integer y long
     ElementoUML cliente = new ElementoUML(
@@ -500,30 +632,47 @@ class XmiServiceTest {
     String xmi = service.exportXmi(project.getId(), diagram.getId(), "tester@case.bo");
 
     // 1. Validar tipos de datos primitivos en <uml:Model>
-    assertThat(xmi).contains("<packagedElement xmi:type=\"uml:PrimitiveType\" xmi:id=\"dt_Integer\" name=\"Integer\"/>");
-    assertThat(xmi).contains("<packagedElement xmi:type=\"uml:PrimitiveType\" xmi:id=\"dt_long\" name=\"long\"/>");
+    assertThat(xmi).contains("xmi.version=\"1.1\"");
+    assertThat(xmi).contains("xmlns:UML=\"omg.org/UML1.3\"");
+    assertThat(xmi).contains("<UML:Class name=\"Cliente\"");
+    assertThat(xmi).contains("<UML:Class name=\"Reserva\"");
+    assertThat(xmi).contains("<UML:Class name=\"Sucursal\"");
 
     // 2. Validar ownedAttribute con tipos enlazados
-    assertThat(xmi).contains("name=\"Id\" visibility=\"public\" type=\"dt_Integer\"");
-    assertThat(xmi).contains("name=\"Nombre\" visibility=\"public\" type=\"dt_long\"");
-    assertThat(xmi).contains("name=\"IdSucursal\" visibility=\"private\" type=\"dt_Integer\"");
+    assertThat(xmi).contains("<UML:Attribute name=\"Id\"");
+    assertThat(xmi).contains("<UML:Attribute name=\"Nombre\"");
+    assertThat(xmi).contains("<UML:Attribute name=\"IdSucursal\"");
+    assertThat(xmi).contains("<UML:StructuralFeature.type><UML:Classifier xmi.idref=\"Integer\"/></UML:StructuralFeature.type>");
+    assertThat(xmi).contains("<UML:StructuralFeature.type><UML:Classifier xmi.idref=\"long\"/></UML:StructuralFeature.type>");
+    assertThat(xmi).contains("<UML:TaggedValue tag=\"type\" value=\"Integer\"/>");
+    assertThat(xmi).contains("<UML:TaggedValue tag=\"type\" value=\"long\"/>");
+    assertThat(xmi).contains("visibility=\"private\" changeability=\"changeable\"");
 
     // 3. Validar extensión de Enterprise Architect con tipos y scopes
-    assertThat(xmi).contains("extender=\"Enterprise Architect\" extenderID=\"6.5\"");
-    assertThat(xmi).contains("<attribute xmi:idref=\"attr_c1\" name=\"Id\" scope=\"Public\" type=\"Integer\">");
-    assertThat(xmi).contains("<properties type=\"Integer\"");
-    assertThat(xmi).contains("<attribute xmi:idref=\"attr_c2\" name=\"Nombre\" scope=\"Public\" type=\"long\">");
-    assertThat(xmi).contains("<properties type=\"long\"");
-    assertThat(xmi).contains("<attribute xmi:idref=\"attr_s1\" name=\"IdSucursal\" scope=\"Private\" type=\"Integer\">");
+    assertThat(xmi).contains("<UML:Association name=\"realiza\"");
+    assertThat(xmi).contains("<UML:Association name=\"\"");
+    assertThat(xmi).contains("xmi.idref=\"EAID_11111111_0000_0000_0000_000000000001\"");
+    assertThat(xmi).contains("xmi.idref=\"EAID_22222222_0000_0000_0000_000000000002\"");
+    assertThat(xmi).contains("xmi.idref=\"EAID_33333333_0000_0000_0000_000000000003\"");
+    assertThat(xmi).contains("lower=\"1\" upper=\"1\"");
+    assertThat(xmi).contains("lower=\"0\" upper=\"-1\"");
+    assertThat(xmi).contains("lower=\"1\" upper=\"-1\"");
 
     // 4. Validar geometría de diagrama de Enterprise Architect
-    assertThat(xmi).contains("<diagrams>");
+    assertThat(xmi).contains("<UML:Diagram.element>");
     assertThat(xmi).contains("geometry=\"Left=120;Top=140;Right=320;");
     assertThat(xmi).contains("geometry=\"Left=420;Top=360;Right=620;");
     assertThat(xmi).contains("geometry=\"Left=720;Top=200;Right=920;");
+    assertThat(xmi).contains("subject=\"EAID_11111111_0000_0000_0000_000000000001\"");
+    assertThat(xmi).contains("subject=\"EAID_22222222_0000_0000_0000_000000000002\"");
+    assertThat(xmi).contains("subject=\"EAID_33333333_0000_0000_0000_000000000003\"");
+    assertThat(xmi).contains("geometry=\"SX=0;SY=0;EX=0;EY=0;Path=;\"");
 
     // 5. Validar conectores en la extensión
-    assertThat(xmi).contains("<connector xmi:idref=\"rel_");
+    assertThat(xmi).contains("<xmi:Extension extender=\"Enterprise Architect\">");
+    assertThat(xmi).contains("<connectors>");
+    assertThat(xmi).contains("<connector xmi:id=\"");
+    assertThat(xmi).contains("<properties name=\"realiza\" ea_type=\"Association\"/>");
     assertThat(xmi).contains("multiplicity=\"1..1\"");
     assertThat(xmi).contains("multiplicity=\"0..*\"");
     assertThat(xmi).contains("multiplicity=\"1..*\"");

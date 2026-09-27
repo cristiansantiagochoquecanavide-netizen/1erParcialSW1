@@ -101,21 +101,21 @@ export function RelationalModal({
             className={`tab-btn ${activeTab === 'tables' ? 'active' : ''}`}
             onClick={() => setActiveTab('tables')}
           >
-            📋 Esquema de Tablas ({schema.tables.length})
+            Esquema de Tablas ({schema.tables.length})
           </button>
           <button
             type="button"
             className={`tab-btn ${activeTab === 'sql' ? 'active' : ''}`}
             onClick={() => setActiveTab('sql')}
           >
-            💾 Script SQL DDL (PostgreSQL)
+            Script SQL DDL (PostgreSQL)
           </button>
           <button
             type="button"
             className={`tab-btn ${activeTab === 'import' ? 'active' : ''}`}
             onClick={() => setActiveTab('import')}
           >
-            📥 Importar SQL a UML (CU11)
+            Importar SQL a UML (CU11)
           </button>
         </div>
 
@@ -128,7 +128,7 @@ export function RelationalModal({
               schema.tables.map((table) => (
                 <article key={table.name} className="relational-table-card">
                   <header className="table-card-header">
-                    <span className="table-title">🗄️ {table.name}</span>
+                    <span className="table-title">{table.name}</span>
                     <span className="uml-origin-tag">UML: «{table.umlSourceClass}»</span>
                   </header>
 

@@ -1,6 +1,7 @@
 package bo.edu.caseapp.uml;
 
 import bo.edu.caseapp.error.BadRequestException;
+import bo.edu.caseapp.error.ForbiddenException;
 import bo.edu.caseapp.error.NotFoundException;
 import bo.edu.caseapp.project.Project;
 import bo.edu.caseapp.project.ProjectMember;
@@ -114,9 +115,36 @@ public class UmlService {
     return relationalModelService.generateSchema(elList, relList);
   }
 
+  public void requireNotLocked(DiagramaClase diagram, String email) {
+    if (diagram.isBloqueado() && (diagram.getBloqueadoPor() == null || !diagram.getBloqueadoPor().equalsIgnoreCase(email))) {
+      throw new ForbiddenException("El diagrama está bloqueado por " + diagram.getBloqueadoPor() + " durante una operación de importación/exportación EA.");
+    }
+  }
+
+  public void acquireLock(UUID projectId, UUID diagramId, String email) {
+    projectService.requireCanEdit(projectId, email);
+    DiagramaClase diagram = findDiagram(projectId, diagramId);
+    if (diagram.isBloqueado() && !email.equalsIgnoreCase(diagram.getBloqueadoPor())) {
+      throw new ForbiddenException("El diagrama ya está bloqueado por " + diagram.getBloqueadoPor());
+    }
+    diagram.bloquear(email);
+    diagrams.save(diagram);
+    notifyCollab(diagramId, "DIAGRAM_LOCKED");
+  }
+
+  public void releaseLock(UUID projectId, UUID diagramId, String email) {
+    DiagramaClase diagram = findDiagram(projectId, diagramId);
+    if (diagram.isBloqueado()) {
+      diagram.desbloquear();
+      diagrams.save(diagram);
+      notifyCollab(diagramId, "DIAGRAM_UNLOCKED");
+    }
+  }
+
   public DiagramSummary updateDiagram(UUID projectId, UUID diagramId, String email, UpdateDiagram request) {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = findDiagram(projectId, diagramId);
+    requireNotLocked(diagram, email);
     diagram.update(request.nombre().trim(), clean(request.descripcion()));
     notifyCollab(diagramId, "DIAGRAM_UPDATED");
     return summary(diagram);
@@ -125,6 +153,7 @@ public class UmlService {
   public void deleteDiagram(UUID projectId, UUID diagramId, String email) {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = findDiagram(projectId, diagramId);
+    requireNotLocked(diagram, email);
     diagrams.delete(diagram);
     notifyCollab(diagramId, "DIAGRAM_DELETED");
   }
@@ -132,6 +161,7 @@ public class UmlService {
   public ElementDetail saveElement(UUID projectId, UUID diagramId, String email, SaveElement request) {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = findDiagram(projectId, diagramId);
+    requireNotLocked(diagram, email);
 
     ElementoUML element;
     if (request.id() != null) {
@@ -175,7 +205,8 @@ public class UmlService {
 
   public void syncPositions(UUID projectId, UUID diagramId, String email, SyncPositions request) {
     projectService.requireCanEdit(projectId, email);
-    findDiagram(projectId, diagramId);
+    DiagramaClase diagram = findDiagram(projectId, diagramId);
+    requireNotLocked(diagram, email);
 
     if (request.positions() == null) return;
     for (PositionUpdate pos : request.positions()) {
@@ -191,7 +222,8 @@ public class UmlService {
 
   public void deleteElement(UUID projectId, UUID diagramId, String email, UUID elementId) {
     projectService.requireCanEdit(projectId, email);
-    findDiagram(projectId, diagramId);
+    DiagramaClase diagram = findDiagram(projectId, diagramId);
+    requireNotLocked(diagram, email);
     ElementoUML element = elements.findById(elementId)
         .orElseThrow(() -> new NotFoundException("Elemento UML no encontrado."));
     if (!element.getDiagrama().getId().equals(diagramId)) {
@@ -206,6 +238,7 @@ public class UmlService {
   public RelationDetail saveRelation(UUID projectId, UUID diagramId, String email, SaveRelation request) {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = findDiagram(projectId, diagramId);
+    requireNotLocked(diagram, email);
 
     ElementoUML origen = elements.findById(request.elementoOrigen())
         .orElseThrow(() -> new NotFoundException("Elemento origen no encontrado."));
@@ -259,7 +292,8 @@ public class UmlService {
 
   public void deleteRelation(UUID projectId, UUID diagramId, String email, UUID relationId) {
     projectService.requireCanEdit(projectId, email);
-    findDiagram(projectId, diagramId);
+    DiagramaClase diagram = findDiagram(projectId, diagramId);
+    requireNotLocked(diagram, email);
     RelacionUML relation = relations.findById(relationId)
         .orElseThrow(() -> new NotFoundException("Relación UML no encontrada."));
     if (!relation.getDiagrama().getId().equals(diagramId)) {
@@ -279,7 +313,17 @@ public class UmlService {
   }
 
   private DiagramSummary summary(DiagramaClase d) {
-    return new DiagramSummary(d.getId(), d.getProject().getId(), d.getNombre(), d.getDescripcion(), d.getEstado(), d.getFechaCreacion());
+    return new DiagramSummary(
+        d.getId(),
+        d.getProject().getId(),
+        d.getNombre(),
+        d.getDescripcion(),
+        d.getEstado(),
+        d.getFechaCreacion(),
+        d.isBloqueado(),
+        d.getBloqueadoPor(),
+        d.getFechaBloqueo()
+    );
   }
 
   private ElementDetail elementDetail(ElementoUML e) {

@@ -1,10 +1,28 @@
 # Environment and local tooling
 .env
-**/.env.local
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
 **/node_modules/
 **/dist/
 **/target/
+coverage/
+**/coverage/
+build/
+**/build/
+*.log
+*.ldb
+.DS_Store
+Thumbs.db
 .idea/
 .vscode/
+antigravity.json
 antigravity.jsonc
+opencode.jsonc
+
+# Temporary exports and verification artifacts
+/scratch/
+**/scratch/
 

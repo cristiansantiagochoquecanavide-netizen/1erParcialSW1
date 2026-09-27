@@ -58,6 +58,9 @@ export type DiagramSummary = {
   descripcion: string | null
   estado: string
   fechaCreacion: string
+  bloqueado?: boolean
+  bloqueadoPor?: string | null
+  fechaBloqueo?: string | null
 }
 
 export type ElementDetail = {

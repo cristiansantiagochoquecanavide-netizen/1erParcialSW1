@@ -12,7 +12,7 @@ RUN mvn clean package -DskipTests
 
 # Etapa 2: Imagen de ejecución ligera con JRE 21
 FROM eclipse-temurin:21-jre-alpine
-RUN apk add --no-cache tesseract-ocr tesseract-ocr-data-eng
+RUN apk add --no-cache tesseract-ocr tesseract-ocr-data-eng tesseract-ocr-data-spa
 WORKDIR /app
 
 # Copia del artefacto JAR generado

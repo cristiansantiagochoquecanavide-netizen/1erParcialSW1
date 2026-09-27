@@ -112,7 +112,7 @@ export function ApiTesterModal({ elements, onClose }: Props) {
       <div className="uml-modal api-tester-modal" style={{ maxWidth: '780px' }}>
         <div className="uml-modal-header">
           <div>
-            <h3>🎙️ Consola de Prueba de API Generada (Voz & REST)</h3>
+            <h3>Consola de Prueba de API Generada (Voz & REST)</h3>
             <span style={{ fontSize: '0.8rem', color: '#64748b' }}>
               Prueba interactivamente los endpoints Spring Boot generados para tu modelo UML
             </span>
@@ -132,13 +132,13 @@ export function ApiTesterModal({ elements, onClose }: Props) {
                 className="btn-sm"
                 onClick={toggleVoice}
                 style={{
-                  background: isListening ? '#ef4444' : '#2563eb',
+                  background: isListening ? '#dc2626' : '#1d4ed8',
                   color: 'white',
                   fontWeight: 'bold',
                   padding: '0.4rem 0.8rem'
                 }}
               >
-                {isListening ? '🔴 Escuchando...' : '🎙️ Dictar Prueba'}
+                {isListening ? 'Escuchando...' : 'Dictar Prueba'}
               </button>
             </div>
             <p style={{ fontSize: '0.8rem', color: '#64748b' }}>
