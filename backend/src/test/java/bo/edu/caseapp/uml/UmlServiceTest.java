@@ -5,12 +5,16 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 import bo.edu.caseapp.error.ForbiddenException;
+import bo.edu.caseapp.error.BadRequestException;
+import bo.edu.caseapp.error.ConflictException;
+import bo.edu.caseapp.error.NotFoundException;
 import bo.edu.caseapp.project.Project;
 import bo.edu.caseapp.project.ProjectMember;
 import bo.edu.caseapp.project.ProjectRole;
 import bo.edu.caseapp.project.ProjectService;
 import bo.edu.caseapp.uml.UmlRequests.CreateDiagram;
 import bo.edu.caseapp.uml.UmlRequests.SaveElement;
+import bo.edu.caseapp.uml.UmlRequests.SaveRelation;
 import bo.edu.caseapp.uml.UmlResponses.DiagramSummary;
 import bo.edu.caseapp.uml.UmlResponses.ElementDetail;
 import bo.edu.caseapp.uml.relational.RelationalModelService;
@@ -86,7 +90,7 @@ class UmlServiceTest {
     ProjectMember member = new ProjectMember(project, project.getCreator(), ProjectRole.PROPIETARIO);
     when(projectService.requireCanEdit(projectId, email)).thenReturn(member);
     when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
-    when(elements.save(any(ElementoUML.class))).thenAnswer(i -> i.getArgument(0));
+    when(elements.saveAndFlush(any(ElementoUML.class))).thenAnswer(i -> i.getArgument(0));
 
     SaveElement request = new SaveElement(
         null,
@@ -112,7 +116,7 @@ class UmlServiceTest {
     ProjectMember member = new ProjectMember(project, project.getCreator(), ProjectRole.PROPIETARIO);
     when(projectService.requireCanEdit(projectId, email)).thenReturn(member);
     when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
-    when(elements.save(any(ElementoUML.class))).thenAnswer(i -> i.getArgument(0));
+    when(elements.saveAndFlush(any(ElementoUML.class))).thenAnswer(i -> i.getArgument(0));
 
     SaveElement request = new SaveElement(
         null,
@@ -209,5 +213,217 @@ class UmlServiceTest {
     assertTrue(schema.sqlDdl().contains("CREATE TABLE cliente"));
     assertTrue(schema.sqlDdl().contains("CREATE TABLE pedido"));
     assertTrue(schema.sqlDdl().contains("cliente_id UUID"));
+  }
+
+  @Test
+  void saveElementUsesClientIdForRetrySafeOfflineCreation() {
+    when(projectService.requireCanEdit(projectId, email)).thenReturn(
+        new ProjectMember(project, project.getCreator(), ProjectRole.PROPIETARIO));
+    when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
+    UUID clientId = UUID.randomUUID();
+    ElementoUML alreadyCreated = new ElementoUML(
+        clientId, diagram, TipoElementoUML.CLASE, "Cliente", 5.0, 8.0, "{}");
+    when(elements.findById(clientId)).thenReturn(Optional.empty(), Optional.of(alreadyCreated));
+    when(elements.saveAndFlush(any(ElementoUML.class))).thenAnswer(i -> i.getArgument(0));
+
+    service.createElement(projectId, diagramId, email,
+        new SaveElement(clientId, TipoElementoUML.CLASE, "Cliente", 5.0, 8.0, "{}"));
+    ElementDetail retried = service.createElement(projectId, diagramId, email,
+        new SaveElement(clientId, TipoElementoUML.CLASE, "Cliente", 5.0, 8.0, "{}"));
+
+    assertEquals(clientId, retried.id());
+    verify(elements, times(1)).saveAndFlush(argThat(element -> clientId.equals(element.getId()) && element.isNew()));
+    verify(elements, never()).save(any(ElementoUML.class));
+  }
+
+  @Test
+  void saveRelationUsesClientIdForRetrySafeOfflineCreation() {
+    when(projectService.requireCanEdit(projectId, email)).thenReturn(
+        new ProjectMember(project, project.getCreator(), ProjectRole.PROPIETARIO));
+    when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
+    UUID sourceId = UUID.randomUUID();
+    UUID targetId = UUID.randomUUID();
+    UUID relationId = UUID.randomUUID();
+    ElementoUML source = new ElementoUML(sourceId, diagram, TipoElementoUML.CLASE, "A", 1, 1, "{}");
+    ElementoUML target = new ElementoUML(targetId, diagram, TipoElementoUML.CLASE, "B", 2, 2, "{}");
+    RelacionUML alreadyCreated = new RelacionUML(
+        relationId, diagram, source, target, "usa", TipoRelacionUML.ASOCIACION, null, null);
+    when(elements.findById(sourceId)).thenReturn(Optional.of(source));
+    when(elements.findById(targetId)).thenReturn(Optional.of(target));
+    when(relations.findById(relationId)).thenReturn(Optional.empty(), Optional.of(alreadyCreated));
+    when(relations.saveAndFlush(any(RelacionUML.class))).thenAnswer(i -> i.getArgument(0));
+    SaveRelation request = new SaveRelation(
+        relationId, sourceId, targetId, "usa", TipoRelacionUML.ASOCIACION, null, null);
+
+    service.createRelation(projectId, diagramId, email, request);
+    var retried = service.createRelation(projectId, diagramId, email, request);
+
+    assertEquals(relationId, retried.id());
+    verify(relations, times(1)).saveAndFlush(argThat(relation -> relationId.equals(relation.getId()) && relation.isNew()));
+    verify(relations, never()).save(any(RelacionUML.class));
+  }
+
+  @Test
+  void saveElementUpdatesExistingElementWithoutChangingIdentity() {
+    when(projectService.requireCanEdit(projectId, email)).thenReturn(
+        new ProjectMember(project, project.getCreator(), ProjectRole.PROPIETARIO));
+    when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
+    UUID elementId = UUID.randomUUID();
+    ElementoUML existing = new ElementoUML(elementId, diagram, TipoElementoUML.CLASE, "Antes", 1, 2, "{}");
+    when(elements.findById(elementId)).thenReturn(Optional.of(existing));
+    when(elements.save(existing)).thenReturn(existing);
+
+    ElementDetail saved = service.updateElement(projectId, diagramId, email, elementId,
+        new SaveElement(elementId, TipoElementoUML.CLASE, "Después", 3.0, 4.0, "{}"));
+
+    assertEquals(elementId, saved.id());
+    assertEquals("Después", saved.nombre());
+    verify(elements).save(existing);
+    verify(elements, never()).saveAndFlush(any());
+  }
+
+  @Test
+  void createElementRejectsExistingIdWithDifferentContentInsteadOfUpdating() {
+    when(projectService.requireCanEdit(projectId, email)).thenReturn(
+        new ProjectMember(project, project.getCreator(), ProjectRole.PROPIETARIO));
+    when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
+    UUID elementId = UUID.randomUUID();
+    ElementoUML existing = new ElementoUML(elementId, diagram, TipoElementoUML.CLASE, "Original", 1, 2, "{}");
+    when(elements.findById(elementId)).thenReturn(Optional.of(existing));
+
+    assertThrows(ConflictException.class, () -> service.createElement(projectId, diagramId, email,
+        new SaveElement(elementId, TipoElementoUML.CLASE, "Different operation", 1.0, 2.0, "{}")));
+    assertEquals("Original", existing.getNombre());
+    verify(elements, never()).save(any());
+    verify(elements, never()).saveAndFlush(any());
+  }
+
+  @Test
+  void createRelationRejectsExistingIdWithDifferentContentInsteadOfUpdating() {
+    when(projectService.requireCanEdit(projectId, email)).thenReturn(
+        new ProjectMember(project, project.getCreator(), ProjectRole.PROPIETARIO));
+    when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
+    UUID sourceId = UUID.randomUUID();
+    UUID targetId = UUID.randomUUID();
+    UUID relationId = UUID.randomUUID();
+    ElementoUML source = new ElementoUML(sourceId, diagram, TipoElementoUML.CLASE, "A", 0, 0, "{}");
+    ElementoUML target = new ElementoUML(targetId, diagram, TipoElementoUML.CLASE, "B", 0, 0, "{}");
+    RelacionUML existing = new RelacionUML(relationId, diagram, source, target, "original",
+        TipoRelacionUML.ASOCIACION, null, null);
+    when(elements.findById(sourceId)).thenReturn(Optional.of(source));
+    when(elements.findById(targetId)).thenReturn(Optional.of(target));
+    when(relations.findById(relationId)).thenReturn(Optional.of(existing));
+
+    assertThrows(ConflictException.class, () -> service.createRelation(projectId, diagramId, email,
+        new SaveRelation(relationId, sourceId, targetId, "different operation",
+            TipoRelacionUML.ASOCIACION, null, null)));
+    assertEquals("original", existing.getNombreRelacion());
+    verify(relations, never()).save(any());
+    verify(relations, never()).saveAndFlush(any());
+  }
+
+  @Test
+  void saveElementRejectsIdOwnedByAnotherDiagram() {
+    when(projectService.requireCanEdit(projectId, email)).thenReturn(
+        new ProjectMember(project, project.getCreator(), ProjectRole.PROPIETARIO));
+    when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
+    DiagramaClase otherDiagram = new DiagramaClase(project, "Otro", "");
+    org.springframework.test.util.ReflectionTestUtils.setField(otherDiagram, "id", UUID.randomUUID());
+    UUID elementId = UUID.randomUUID();
+    when(elements.findById(elementId)).thenReturn(Optional.of(
+        new ElementoUML(elementId, otherDiagram, TipoElementoUML.CLASE, "Privado", 0, 0, "{}")));
+
+    assertThrows(BadRequestException.class, () -> service.saveElement(projectId, diagramId, email,
+        new SaveElement(elementId, TipoElementoUML.CLASE, "Ataque", 0.0, 0.0, "{}")));
+    verify(elements, never()).save(any());
+    verify(elements, never()).saveAndFlush(any());
+  }
+
+  @Test
+  void saveElementMapsPrimaryKeyRaceToCoherentConflict() {
+    when(projectService.requireCanEdit(projectId, email)).thenReturn(
+        new ProjectMember(project, project.getCreator(), ProjectRole.PROPIETARIO));
+    when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
+    when(elements.saveAndFlush(any(ElementoUML.class)))
+        .thenThrow(new org.springframework.dao.DataIntegrityViolationException("database detail"));
+
+    ConflictException conflict = assertThrows(ConflictException.class, () -> service.createElement(
+        projectId, diagramId, email,
+        new SaveElement(UUID.randomUUID(), TipoElementoUML.CLASE, "Clase", 0.0, 0.0, "{}")));
+    assertFalse(conflict.getMessage().contains("database detail"));
+  }
+
+  @Test
+  void saveRelationRejectsEndpointFromAnotherDiagram() {
+    when(projectService.requireCanEdit(projectId, email)).thenReturn(
+        new ProjectMember(project, project.getCreator(), ProjectRole.PROPIETARIO));
+    when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
+    DiagramaClase otherDiagram = new DiagramaClase(project, "Otro", "");
+    org.springframework.test.util.ReflectionTestUtils.setField(otherDiagram, "id", UUID.randomUUID());
+    UUID sourceId = UUID.randomUUID();
+    UUID targetId = UUID.randomUUID();
+    when(elements.findById(sourceId)).thenReturn(Optional.of(
+        new ElementoUML(sourceId, diagram, TipoElementoUML.CLASE, "Local", 0, 0, "{}")));
+    when(elements.findById(targetId)).thenReturn(Optional.of(
+        new ElementoUML(targetId, otherDiagram, TipoElementoUML.CLASE, "Ajeno", 0, 0, "{}")));
+
+    assertThrows(BadRequestException.class, () -> service.saveRelation(projectId, diagramId, email,
+        new SaveRelation(UUID.randomUUID(), sourceId, targetId, "usa", TipoRelacionUML.ASOCIACION,
+            null, null)));
+    verify(relations, never()).save(any());
+    verify(relations, never()).saveAndFlush(any());
+  }
+
+  @Test
+  void saveRelationRejectsIdOwnedByAnotherDiagram() {
+    when(projectService.requireCanEdit(projectId, email)).thenReturn(
+        new ProjectMember(project, project.getCreator(), ProjectRole.PROPIETARIO));
+    when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
+    UUID sourceId = UUID.randomUUID();
+    UUID targetId = UUID.randomUUID();
+    UUID relationId = UUID.randomUUID();
+    ElementoUML source = new ElementoUML(sourceId, diagram, TipoElementoUML.CLASE, "A", 0, 0, "{}");
+    ElementoUML target = new ElementoUML(targetId, diagram, TipoElementoUML.CLASE, "B", 0, 0, "{}");
+    DiagramaClase otherDiagram = new DiagramaClase(project, "Otro", "");
+    org.springframework.test.util.ReflectionTestUtils.setField(otherDiagram, "id", UUID.randomUUID());
+    when(elements.findById(sourceId)).thenReturn(Optional.of(source));
+    when(elements.findById(targetId)).thenReturn(Optional.of(target));
+    when(relations.findById(relationId)).thenReturn(Optional.of(new RelacionUML(
+        relationId, otherDiagram, source, target, "usa", TipoRelacionUML.ASOCIACION, null, null)));
+
+    assertThrows(BadRequestException.class, () -> service.saveRelation(projectId, diagramId, email,
+        new SaveRelation(relationId, sourceId, targetId, "usa", TipoRelacionUML.ASOCIACION,
+            null, null)));
+    verify(relations, never()).save(any());
+    verify(relations, never()).saveAndFlush(any());
+  }
+
+  @Test
+  void requireDiagramAccessAllowsProjectMemberForDiagramInThatProject() {
+    when(projectService.requireAccess(projectId, email)).thenReturn(
+        new ProjectMember(project, project.getCreator(), ProjectRole.PROPIETARIO));
+    when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
+
+    assertDoesNotThrow(() -> service.requireDiagramAccess(projectId, diagramId, email));
+  }
+
+  @Test
+  void requireDiagramAccessRejectsDiagramFromDifferentProject() {
+    UUID otherProjectId = UUID.randomUUID();
+    when(projectService.requireAccess(otherProjectId, email)).thenReturn(
+        new ProjectMember(project, project.getCreator(), ProjectRole.PROPIETARIO));
+    when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
+
+    assertThrows(NotFoundException.class, () -> service.requireDiagramAccess(otherProjectId, diagramId, email));
+  }
+
+  @Test
+  void requireDiagramAccessRejectsNonMemberBeforeLoadingDiagram() {
+    when(projectService.requireAccess(projectId, "outsider@example.com"))
+        .thenThrow(new ForbiddenException("No tienes acceso a este proyecto."));
+
+    assertThrows(ForbiddenException.class,
+        () -> service.requireDiagramAccess(projectId, diagramId, "outsider@example.com"));
+    verifyNoInteractions(diagrams);
   }
 }

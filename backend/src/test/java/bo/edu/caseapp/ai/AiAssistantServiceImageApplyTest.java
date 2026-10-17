@@ -20,7 +20,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 class AiAssistantServiceImageApplyTest {
   @Test
-  void addsValidatedClassesAndConnectedRelationToEditableDiagram() {
+  void addsAndReplacesValidatedModelWithoutLosingEditableDiagramShape() {
     UUID projectId = UUID.randomUUID(), diagramId = UUID.randomUUID();
     User user = new User("Ana", "ana@example.com", "hash");
     Project project = new Project(user, "Proyecto", "");
@@ -85,5 +85,17 @@ class AiAssistantServiceImageApplyTest {
     verify(uml, times(2)).saveElement(eq(projectId), eq(diagramId), eq("ana@example.com"), any());
     verify(uml).saveRelation(eq(projectId), eq(diagramId), eq("ana@example.com"), any());
     verify(elements, never()).deleteByDiagramaId(diagramId);
+
+    persistedElements.clear();
+    persistedRelations.clear();
+    ids.clear();
+    ImageReconstructionResponse replaced = service.applyImageModel(projectId, diagramId, "ana@example.com", new ApplyImageModelRequest(model, ImageImportMode.REPLACE, "uml.png"));
+    assertTrue(replaced.success());
+    assertEquals(2, replaced.updatedDiagram().elements().size());
+    assertEquals(1, replaced.updatedDiagram().relations().size());
+    verify(relations).deleteByDiagramaId(diagramId);
+    verify(relations).flush();
+    verify(elements).deleteByDiagramaId(diagramId);
+    verify(elements).flush();
   }
 }

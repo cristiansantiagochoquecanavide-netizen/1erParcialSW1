@@ -5,6 +5,7 @@ import bo.edu.caseapp.error.NotFoundException;
 import bo.edu.caseapp.generator.GeneratorRequests.GenerateConfig;
 import bo.edu.caseapp.generator.GeneratorResponses.GeneratedFile;
 import bo.edu.caseapp.generator.GeneratorResponses.GenerationPreview;
+import bo.edu.caseapp.generator.GeneratorResponses.GenerationHistoryItem;
 import bo.edu.caseapp.project.ProjectService;
 import bo.edu.caseapp.uml.*;
 import bo.edu.caseapp.uml.relational.*;
@@ -82,6 +83,16 @@ public class CodeGeneratorService {
         frontendFiles.size(),
         list
     );
+  }
+
+  @Transactional(readOnly = true)
+  public List<GenerationHistoryItem> history(UUID projectId, UUID diagramId, String email) {
+    projectService.requireAccess(projectId, email);
+    validateDiagram(projectId, diagramId);
+    return genRepo.findByDiagramaIdOrderByFechaDesc(diagramId)
+        .stream()
+        .map(g -> new GenerationHistoryItem(g.getId(), g.getTipoGeneracion(), g.getEstado(), g.getFecha()))
+        .toList();
   }
 
   public byte[] generateZip(UUID projectId, UUID diagramId, String email, GenerateConfig config) {

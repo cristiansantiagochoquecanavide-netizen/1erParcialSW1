@@ -18,6 +18,8 @@ public class GlobalExceptionHandler {
   public ResponseEntity<ApiError> handleForbidden(Exception exception) { return response(HttpStatus.FORBIDDEN, exception.getMessage()); }
   @ExceptionHandler(BadRequestException.class)
   public ResponseEntity<ApiError> handleBadRequest(BadRequestException exception) { return response(HttpStatus.BAD_REQUEST, exception.getMessage()); }
+  @ExceptionHandler(ConflictException.class)
+  public ResponseEntity<ApiError> handleConflict(ConflictException exception) { return response(HttpStatus.CONFLICT, exception.getMessage()); }
   @ExceptionHandler(MethodArgumentNotValidException.class)
   public ResponseEntity<ApiError> handleValidation(MethodArgumentNotValidException exception) {
     String message = exception.getBindingResult().getFieldErrors().stream()
@@ -33,7 +35,7 @@ public class GlobalExceptionHandler {
   @ExceptionHandler(Exception.class)
   public ResponseEntity<ApiError> handleUnexpected(Exception exception, HttpServletRequest request) {
     log.error("Unexpected error on request {}: ", request.getRequestURI(), exception);
-    return response(HttpStatus.INTERNAL_SERVER_ERROR, "Ocurrió un error inesperado: " + exception.getMessage());
+    return response(HttpStatus.INTERNAL_SERVER_ERROR, "Ocurrió un error inesperado.");
   }
   private ResponseEntity<ApiError> response(HttpStatus status, String message) { return ResponseEntity.status(status).body(new ApiError(Instant.now(), status.value(), status.getReasonPhrase(), message)); }
 }

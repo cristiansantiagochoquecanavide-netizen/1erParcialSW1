@@ -1,6 +1,7 @@
 package bo.edu.caseapp.uml;
 
 import bo.edu.caseapp.error.BadRequestException;
+import bo.edu.caseapp.error.ConflictException;
 import bo.edu.caseapp.error.ForbiddenException;
 import bo.edu.caseapp.error.NotFoundException;
 import bo.edu.caseapp.project.Project;
@@ -13,12 +14,15 @@ import bo.edu.caseapp.uml.relational.RelationalSchema;
 import bo.edu.caseapp.uml.validation.UmlValidatorService;
 import bo.edu.caseapp.uml.validation.ValidationReport;
 import java.util.*;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
 @Transactional
 public class UmlService {
+  private enum SaveMode { CREATE, UPDATE }
+
   private final DiagramaClaseRepository diagrams;
   private final ElementoUMLRepository elements;
   private final RelacionUMLRepository relations;
@@ -98,6 +102,12 @@ public class UmlService {
   }
 
   @Transactional(readOnly = true)
+  public void requireDiagramAccess(UUID projectId, UUID diagramId, String email) {
+    projectService.requireAccess(projectId, email);
+    findDiagram(projectId, diagramId);
+  }
+
+  @Transactional(readOnly = true)
   public ValidationReport validateDiagram(UUID projectId, UUID diagramId, String email) {
     projectService.requireAccess(projectId, email);
     findDiagram(projectId, diagramId);
@@ -159,17 +169,40 @@ public class UmlService {
   }
 
   public ElementDetail saveElement(UUID projectId, UUID diagramId, String email, SaveElement request) {
+    return saveElement(projectId, diagramId, email, request,
+        request.id() == null ? SaveMode.CREATE : SaveMode.UPDATE);
+  }
+
+  public ElementDetail createElement(UUID projectId, UUID diagramId, String email, SaveElement request) {
+    return saveElement(projectId, diagramId, email, request, SaveMode.CREATE);
+  }
+
+  public ElementDetail updateElement(UUID projectId, UUID diagramId, String email, UUID elementId, SaveElement request) {
+    if (request.id() != null && !request.id().equals(elementId)) {
+      throw new BadRequestException("El identificador del cuerpo no coincide con el elemento solicitado.");
+    }
+    return saveElement(projectId, diagramId, email,
+        new SaveElement(elementId, request.tipoElemento(), request.nombre(), request.posicionX(),
+            request.posicionY(), request.propiedadesJson()), SaveMode.UPDATE);
+  }
+
+  private ElementDetail saveElement(UUID projectId, UUID diagramId, String email, SaveElement request, SaveMode mode) {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = findDiagram(projectId, diagramId);
     requireNotLocked(diagram, email);
 
     ElementoUML element;
+    boolean created = false;
     if (request.id() != null) {
       java.util.Optional<ElementoUML> existing = elements.findById(request.id());
       if (existing.isPresent()) {
         element = existing.get();
         if (!element.getDiagrama().getId().equals(diagramId)) {
           throw new BadRequestException("El elemento no pertenece a este diagrama.");
+        }
+        if (matches(element, request)) return elementDetail(element);
+        if (mode == SaveMode.CREATE) {
+          throw new ConflictException("El identificador del elemento ya corresponde a otro contenido.");
         }
         element.update(
             request.tipoElemento(),
@@ -179,7 +212,10 @@ public class UmlService {
             request.propiedadesJson()
         );
       } else {
+        if (mode == SaveMode.UPDATE) throw new NotFoundException("Elemento UML no encontrado.");
+        created = true;
         element = new ElementoUML(
+            request.id(),
             diagram,
             request.tipoElemento(),
             request.nombre().trim(),
@@ -189,6 +225,8 @@ public class UmlService {
         );
       }
     } else {
+      if (mode == SaveMode.UPDATE) throw new BadRequestException("La actualización requiere el identificador del elemento.");
+      created = true;
       element = new ElementoUML(
           diagram,
           request.tipoElemento(),
@@ -198,7 +236,8 @@ public class UmlService {
           request.propiedadesJson()
       );
     }
-    ElementDetail saved = elementDetail(elements.save(element));
+    ElementoUML persisted = created ? saveNewElement(element) : elements.save(element);
+    ElementDetail saved = elementDetail(persisted);
     notifyCollab(diagramId, "ELEMENT_SAVED");
     return saved;
   }
@@ -236,6 +275,24 @@ public class UmlService {
   }
 
   public RelationDetail saveRelation(UUID projectId, UUID diagramId, String email, SaveRelation request) {
+    return saveRelation(projectId, diagramId, email, request,
+        request.id() == null ? SaveMode.CREATE : SaveMode.UPDATE);
+  }
+
+  public RelationDetail createRelation(UUID projectId, UUID diagramId, String email, SaveRelation request) {
+    return saveRelation(projectId, diagramId, email, request, SaveMode.CREATE);
+  }
+
+  public RelationDetail updateRelation(UUID projectId, UUID diagramId, String email, UUID relationId, SaveRelation request) {
+    if (request.id() != null && !request.id().equals(relationId)) {
+      throw new BadRequestException("El identificador del cuerpo no coincide con la relación solicitada.");
+    }
+    return saveRelation(projectId, diagramId, email,
+        new SaveRelation(relationId, request.elementoOrigen(), request.elementoDestino(), request.nombreRelacion(),
+            request.tipoRelacion(), request.multiplicidadOrigen(), request.multiplicidadDestino()), SaveMode.UPDATE);
+  }
+
+  private RelationDetail saveRelation(UUID projectId, UUID diagramId, String email, SaveRelation request, SaveMode mode) {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = findDiagram(projectId, diagramId);
     requireNotLocked(diagram, email);
@@ -250,6 +307,7 @@ public class UmlService {
     }
 
     RelacionUML relation;
+    boolean created = false;
     if (request.id() != null) {
       java.util.Optional<RelacionUML> existing = relations.findById(request.id());
       if (existing.isPresent()) {
@@ -257,14 +315,23 @@ public class UmlService {
         if (!relation.getDiagrama().getId().equals(diagramId)) {
           throw new BadRequestException("La relación no pertenece a este diagrama.");
         }
+        if (matches(relation, request, origen, destino)) return relationDetail(relation);
+        if (mode == SaveMode.CREATE) {
+          throw new ConflictException("El identificador de la relación ya corresponde a otro contenido.");
+        }
         relation.update(
+            origen,
+            destino,
             clean(request.nombreRelacion()),
             request.tipoRelacion(),
             clean(request.multiplicidadOrigen()),
             clean(request.multiplicidadDestino())
         );
       } else {
+        if (mode == SaveMode.UPDATE) throw new NotFoundException("Relación UML no encontrada.");
+        created = true;
         relation = new RelacionUML(
+            request.id(),
             diagram,
             origen,
             destino,
@@ -275,6 +342,8 @@ public class UmlService {
         );
       }
     } else {
+      if (mode == SaveMode.UPDATE) throw new BadRequestException("La actualización requiere el identificador de la relación.");
+      created = true;
       relation = new RelacionUML(
           diagram,
           origen,
@@ -285,7 +354,8 @@ public class UmlService {
           clean(request.multiplicidadDestino())
       );
     }
-    RelationDetail saved = relationDetail(relations.save(relation));
+    RelacionUML persisted = created ? saveNewRelation(relation) : relations.save(relation);
+    RelationDetail saved = relationDetail(persisted);
     notifyCollab(diagramId, "RELATION_SAVED");
     return saved;
   }
@@ -336,5 +406,39 @@ public class UmlService {
 
   private String clean(String value) {
     return value == null || value.isBlank() ? null : value.trim();
+  }
+
+  private ElementoUML saveNewElement(ElementoUML element) {
+    try {
+      return elements.saveAndFlush(element);
+    } catch (DataIntegrityViolationException exception) {
+      throw new ConflictException("El identificador del elemento ya está en uso. Reintenta la operación.");
+    }
+  }
+
+  private RelacionUML saveNewRelation(RelacionUML relation) {
+    try {
+      return relations.saveAndFlush(relation);
+    } catch (DataIntegrityViolationException exception) {
+      throw new ConflictException("El identificador de la relación ya está en uso. Reintenta la operación.");
+    }
+  }
+
+  private boolean matches(ElementoUML element, SaveElement request) {
+    String properties = request.propiedadesJson();
+    return element.getTipoElemento() == request.tipoElemento()
+        && element.getNombre().equals(request.nombre().trim())
+        && Double.compare(element.getPosicionX(), request.posicionX()) == 0
+        && Double.compare(element.getPosicionY(), request.posicionY()) == 0
+        && (properties == null || properties.isBlank() || properties.equals(element.getPropiedadesJson()));
+  }
+
+  private boolean matches(RelacionUML relation, SaveRelation request, ElementoUML origin, ElementoUML target) {
+    return relation.getElementoOrigen().getId().equals(origin.getId())
+        && relation.getElementoDestino().getId().equals(target.getId())
+        && Objects.equals(relation.getNombreRelacion(), clean(request.nombreRelacion()))
+        && relation.getTipoRelacion() == request.tipoRelacion()
+        && Objects.equals(relation.getMultiplicidadOrigen(), clean(request.multiplicidadOrigen()))
+        && Objects.equals(relation.getMultiplicidadDestino(), clean(request.multiplicidadDestino()));
   }
 }

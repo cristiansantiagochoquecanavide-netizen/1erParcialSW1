@@ -4,6 +4,7 @@ import bo.edu.caseapp.ai.AiRequests.*;
 import bo.edu.caseapp.error.BadRequestException;
 import bo.edu.caseapp.uml.TipoElementoUML;
 import bo.edu.caseapp.uml.TipoRelacionUML;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.*;
@@ -11,7 +12,7 @@ import java.util.regex.Pattern;
 
 /** Strictly validates Gemini's JSON and removes only low-confidence details before persistence. */
 public final class UmlImageModelValidator {
-  private static final ObjectMapper JSON = new ObjectMapper();
+  private static final ObjectMapper JSON = new ObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
   private static final Pattern UML_NAME = Pattern.compile("[\\p{L}_][\\p{L}\\p{N}_]{0,119}");
   private static final Pattern MULTIPLICITY = Pattern.compile("(?i)(?:\\*|[0-9]{1,6}|[0-9]{1,6}\\.\\.(?:[0-9]{1,6}|\\*|[nNmM])|\\.\\.(?:[0-9]{1,6}|\\*|[nNmM])|[nNmM])");
   private static final double MIN_CLASS_CONFIDENCE = 0.50;
@@ -25,37 +26,28 @@ public final class UmlImageModelValidator {
       if (response == null || response.isBlank()) {
         throw invalid("Gemini devolvió una respuesta vacía.");
       }
-      String jsonText = response.trim();
-      if (jsonText.contains("```")) {
-        int start = jsonText.indexOf('{');
-        int end = jsonText.lastIndexOf('}');
-        if (start >= 0 && end > start) {
-          jsonText = jsonText.substring(start, end + 1);
-        }
-      }
-
-      JsonNode root = JSON.readTree(jsonText);
+      JsonNode root = JSON.readTree(response.trim());
       requireObject(root, "La respuesta de Gemini debe ser un objeto JSON.");
-      requireRequiredFields(root, Set.of("classes", "relations"), "La respuesta debe contener los arreglos classes y relations.");
-      if (!root.path("classes").isArray() || !root.path("relations").isArray()) {
-        throw invalid("classes y relations deben ser arreglos JSON.");
+      requireFields(root, Set.of("classes", "relations", "warnings"), "La respuesta debe contener únicamente classes, relations y warnings.");
+      if (!root.path("classes").isArray() || !root.path("relations").isArray() || !root.path("warnings").isArray()) {
+        throw invalid("classes, relations y warnings deben ser arreglos JSON.");
       }
       if (root.path("classes").size() > 150 || root.path("relations").size() > 500) throw invalid("El diagrama excede el límite de elementos permitido.");
 
-      List<String> warnings = root.has("warnings") && root.path("warnings").isArray() ? readWarnings(root.path("warnings")) : new ArrayList<>();
+      List<String> warnings = readWarnings(root.path("warnings"));
       List<ImageClass> classes = new ArrayList<>();
       Map<String, ImageClass> byName = new LinkedHashMap<>();
       for (JsonNode node : root.path("classes")) {
         requireObject(node, "Cada clase debe ser un objeto JSON.");
-        requireRequiredFields(node, Set.of("name"), "Una clase contiene campos faltantes.");
+        requireFields(node, Set.of("name", "type", "confidence", "x", "y", "attributes", "methods"), "Una clase contiene campos faltantes o no reconocidos.");
         String name = optionalText(node, "name", 120);
         String typeText = optionalText(node, "type", 40);
         if (name == null) { warnings.add("Se omitió un elemento cuyo nombre no se pudo identificar."); continue; }
         TipoElementoUML type = parseClassType(typeText);
+        if (type == null) { warnings.add("Se omitió «" + name + "» porque no se pudo identificar su tipo UML."); continue; }
         double confidence = readConfidence(node, "confidence");
         JsonNode attrsNode = node.path("attributes"), methodsNode = node.path("methods");
-        if (!attrsNode.isMissingNode() && !attrsNode.isNull() && !attrsNode.isArray()) throw invalid("Los atributos deben ser un arreglo.");
-        if (!methodsNode.isMissingNode() && !methodsNode.isNull() && !methodsNode.isArray()) throw invalid("Los métodos deben ser un arreglo.");
+        if (!attrsNode.isArray() || !methodsNode.isArray()) throw invalid("Los atributos y métodos deben ser arreglos JSON.");
         if (!UML_NAME.matcher(name).matches()) {
           warnings.add("Se omitió un elemento porque su nombre no es válido o no se pudo leer claramente.");
           continue;
@@ -73,8 +65,8 @@ public final class UmlImageModelValidator {
         Double x = optionalCoordinate(node, "x", warnings, name);
         Double y = optionalCoordinate(node, "y", warnings, name);
         if (x == null || y == null) { x = null; y = null; }
-        List<ImageAttribute> attrs = attrsNode.isArray() ? readAttributes(attrsNode, name, warnings) : List.of();
-        List<ImageMethod> methods = methodsNode.isArray() ? readMethods(methodsNode, name, warnings) : List.of();
+        List<ImageAttribute> attrs = readAttributes(attrsNode, name, warnings);
+        List<ImageMethod> methods = readMethods(methodsNode, name, warnings);
         ImageClass umlClass = new ImageClass(name, type, confidence, x, y, attrs, methods);
         byName.put(key, umlClass);
         classes.add(umlClass);
@@ -85,11 +77,12 @@ public final class UmlImageModelValidator {
       Set<String> uniqueRelations = new HashSet<>();
       for (JsonNode node : root.path("relations")) {
         requireObject(node, "Cada relación debe ser un objeto JSON.");
-        requireRequiredFields(node, Set.of("source", "target"), "Una relación contiene campos faltantes.");
+        requireFields(node, Set.of("source", "target", "type", "name", "multiplicitySource", "multiplicityTarget", "confidence"), "Una relación contiene campos faltantes o no reconocidos.");
         String source = optionalText(node, "source", 120), target = optionalText(node, "target", 120);
         String typeText = optionalText(node, "type", 40);
         if (source == null || target == null) { warnings.add("Se omitió una relación cuyo origen o destino no se pudo identificar."); continue; }
         TipoRelacionUML type = parseRelationType(typeText);
+        if (type == null) { warnings.add("Se omitió una relación porque no se pudo identificar su tipo UML."); continue; }
         double confidence = readConfidence(node, "confidence");
         if (confidence < MIN_RELATION_CONFIDENCE) {
           warnings.add("Se omitió la relación «" + source + " → " + target + "» por baja confianza de lectura.");
@@ -137,25 +130,27 @@ public final class UmlImageModelValidator {
   }
 
   private static TipoElementoUML parseClassType(String value) {
-    if (value == null || value.isBlank()) return TipoElementoUML.CLASE;
+    if (value == null || value.isBlank()) return null;
     String v = value.trim().toUpperCase(Locale.ROOT);
     return switch (v) {
       case "INTERFAZ", "INTERFACE" -> TipoElementoUML.INTERFAZ;
       case "CLASE_ABSTRACTA", "ABSTRACT_CLASS", "ABSTRACT", "ABSTRACTCLASS" -> TipoElementoUML.CLASE_ABSTRACTA;
       case "ENUMERACION", "ENUM", "ENUMERATION" -> TipoElementoUML.ENUMERACION;
-      default -> TipoElementoUML.CLASE;
+      case "CLASE", "CLASS" -> TipoElementoUML.CLASE;
+      default -> null;
     };
   }
 
   private static TipoRelacionUML parseRelationType(String value) {
-    if (value == null || value.isBlank()) return TipoRelacionUML.ASOCIACION;
+    if (value == null || value.isBlank()) return null;
     String v = value.trim().toUpperCase(Locale.ROOT);
     return switch (v) {
       case "HERENCIA", "INHERITANCE", "GENERALIZATION", "EXTENDS", "IMPLEMENTS" -> TipoRelacionUML.HERENCIA;
       case "AGREGACION", "AGGREGATION" -> TipoRelacionUML.AGREGACION;
       case "COMPOSICION", "COMPOSITION" -> TipoRelacionUML.COMPOSICION;
       case "DEPENDENCIA", "DEPENDENCY" -> TipoRelacionUML.DEPENDENCIA;
-      default -> TipoRelacionUML.ASOCIACION;
+      case "ASOCIACION", "ASSOCIATION" -> TipoRelacionUML.ASOCIACION;
+      default -> null;
     };
   }
 
@@ -164,7 +159,7 @@ public final class UmlImageModelValidator {
     Set<String> names = new HashSet<>();
     for (JsonNode node : array) {
       requireObject(node, "Cada atributo debe ser un objeto JSON.");
-      requireRequiredFields(node, Set.of("name"), "Un atributo contiene campos faltantes.");
+      requireFields(node, Set.of("name", "type", "visibility", "confidence"), "Un atributo contiene campos faltantes o no reconocidos.");
       String name = optionalText(node, "name", 120);
       if (name == null) { warnings.add("Se omitió un atributo de «" + className + "» cuyo nombre no se pudo leer."); continue; }
       double confidence = readConfidence(node, "confidence");
@@ -174,9 +169,10 @@ public final class UmlImageModelValidator {
       String visibility = optionalText(node, "visibility", 1);
       if (visibility == null || !Set.of("+", "-", "#", "~").contains(visibility)) {
         visibility = "~";
+        warnings.add("No se identificó la visibilidad de «" + name + "»; se dejó sin especificar.");
       }
       String type = optionalText(node, "type", 120);
-      if (type == null) { type = "?"; }
+      if (type == null) { type = "?"; warnings.add("No se identificó el tipo de «" + name + "» en «" + className + "»."); }
       result.add(new ImageAttribute(visibility, name, type, confidence));
     }
     return List.copyOf(result);
@@ -187,7 +183,7 @@ public final class UmlImageModelValidator {
     Set<String> names = new HashSet<>();
     for (JsonNode node : array) {
       requireObject(node, "Cada método debe ser un objeto JSON.");
-      requireRequiredFields(node, Set.of("name"), "Un método contiene campos faltantes.");
+      requireFields(node, Set.of("name", "returnType", "parameters", "visibility", "confidence"), "Un método contiene campos faltantes o no reconocidos.");
       String name = optionalText(node, "name", 120);
       if (name == null) { warnings.add("Se omitió un método de «" + className + "» cuyo nombre no se pudo leer."); continue; }
       double confidence = readConfidence(node, "confidence");
@@ -197,11 +193,16 @@ public final class UmlImageModelValidator {
       String visibility = optionalText(node, "visibility", 1);
       if (visibility == null || !Set.of("+", "-", "#", "~").contains(visibility)) {
         visibility = "~";
+        warnings.add("No se identificó la visibilidad del método «" + name + "»; se dejó sin especificar.");
       }
       String returnType = optionalText(node, "returnType", 120);
-      if (returnType == null) { returnType = "?"; }
+      if (returnType == null) { returnType = "?"; warnings.add("No se identificó el tipo de retorno de «" + name + "» en «" + className + "»."); }
       JsonNode parametersNode = node.get("parameters");
-      String parameters = parametersNode != null && parametersNode.isTextual() && parametersNode.asText().length() <= 300 ? parametersNode.asText().trim() : "";
+      if (parametersNode == null || parametersNode.isNull() || !parametersNode.isTextual() || parametersNode.asText().length() > 300) {
+        warnings.add("Se omitió el método «" + name + "» porque no se pudieron identificar sus parámetros.");
+        continue;
+      }
+      String parameters = parametersNode.asText().trim();
       result.add(new ImageMethod(visibility, name, returnType, parameters, confidence));
     }
     return List.copyOf(result);
@@ -209,7 +210,7 @@ public final class UmlImageModelValidator {
 
   private static String readMultiplicity(JsonNode node, String field, String endpoint, List<String> warnings) {
     String value = optionalText(node, field, 20);
-    if (value == null) return null;
+    if (value == null) { warnings.add("No se pudo identificar la multiplicidad junto a «" + endpoint + "»."); return null; }
     value = normalizeMultiplicity(value);
     if (!MULTIPLICITY.matcher(value).matches()) {
       warnings.add("Se ignoró la multiplicidad no reconocida «" + value + "» en «" + endpoint + "».");
@@ -261,13 +262,19 @@ public final class UmlImageModelValidator {
 
   private static double readConfidence(JsonNode node, String field) {
     JsonNode value = node.get(field);
-    if (value == null || value.isNull() || !value.isNumber()) return 0.90;
+    if (value == null || value.isNull() || !value.isNumber()) throw invalid("Falta la confianza numérica de lectura.");
     double v = value.asDouble();
-    if (!Double.isFinite(v) || v < 0 || v > 1) return 0.90;
+    if (!Double.isFinite(v) || v < 0 || v > 1) throw invalid("La confianza de lectura está fuera del rango 0..1.");
     return v;
   }
 
   private static void requireObject(JsonNode node, String error) { if (node == null || !node.isObject()) throw invalid(error); }
+  private static void requireFields(JsonNode node, Set<String> fields, String error) {
+    if (node == null || !node.isObject()) throw invalid(error);
+    Set<String> actual = new HashSet<>();
+    node.fieldNames().forEachRemaining(actual::add);
+    if (!actual.equals(fields)) throw invalid(error);
+  }
   private static void requireRequiredFields(JsonNode node, Set<String> requiredFields, String error) {
     if (node == null || !node.isObject()) throw invalid(error);
     for (String field : requiredFields) {

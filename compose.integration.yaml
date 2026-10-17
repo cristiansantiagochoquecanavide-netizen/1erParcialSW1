@@ -1,0 +1,9 @@
+# Overrides for an isolated local integration run. The project name passed to
+# `docker compose -p` gives this profile a separate network and PostgreSQL volume.
+services:
+  postgres:
+    container_name: !reset null
+  backend:
+    container_name: !reset null
+  frontend:
+    container_name: !reset null

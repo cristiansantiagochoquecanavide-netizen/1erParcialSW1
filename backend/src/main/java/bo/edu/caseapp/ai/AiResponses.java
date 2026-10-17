@@ -38,6 +38,8 @@ public final class AiResponses {
 
   public record InteractionHistoryItem(
       UUID id,
+      UUID usuarioId,
+      String usuarioNombre,
       String tipoInteraccion,
       String entradaUsuario,
       String respuestaAgente,

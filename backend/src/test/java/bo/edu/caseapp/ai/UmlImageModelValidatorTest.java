@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import bo.edu.caseapp.ai.AiRequests.*;
 import bo.edu.caseapp.error.BadRequestException;
+import bo.edu.caseapp.uml.TipoRelacionUML;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
@@ -25,6 +26,18 @@ class UmlImageModelValidatorTest {
         """);
     assertEquals(2, model.classes().size());
     assertEquals(1, model.relations().size());
+  }
+
+  @Test
+  void parsesMultipleRelationshipKindsWithValidatedEndpoints() {
+    ImageModel model = validate("""
+        {"classes":[{"name":"A","type":"CLASE","confidence":0.9,"x":100,"y":100,"attributes":[],"methods":[]},{"name":"B","type":"CLASE","confidence":0.9,"x":400,"y":100,"attributes":[],"methods":[]},{"name":"C","type":"CLASE","confidence":0.9,"x":700,"y":100,"attributes":[],"methods":[]},{"name":"D","type":"CLASE_ABSTRACTA","confidence":0.9,"x":1000,"y":100,"attributes":[],"methods":[]}],"relations":[{"source":"A","target":"B","type":"COMPOSICION","name":null,"multiplicitySource":"1","multiplicityTarget":"1..N","confidence":0.9},{"source":"B","target":"C","type":"AGREGACION","name":null,"multiplicitySource":"1","multiplicityTarget":"*","confidence":0.9},{"source":"C","target":"D","type":"DEPENDENCIA","name":null,"multiplicitySource":null,"multiplicityTarget":null,"confidence":0.9},{"source":"A","target":"D","type":"HERENCIA","name":null,"multiplicitySource":null,"multiplicityTarget":null,"confidence":0.9}],"warnings":[]}
+        """);
+    assertEquals(4, model.relations().size());
+    assertTrue(model.relations().stream().anyMatch(r -> r.type() == TipoRelacionUML.COMPOSICION));
+    assertTrue(model.relations().stream().anyMatch(r -> r.type() == TipoRelacionUML.AGREGACION));
+    assertTrue(model.relations().stream().anyMatch(r -> r.type() == TipoRelacionUML.DEPENDENCIA));
+    assertEquals("1..*", model.relations().getFirst().multiplicityTarget());
   }
 
   @Test
@@ -69,6 +82,8 @@ class UmlImageModelValidatorTest {
   void rejectsMalformedOrUnstructuredResponsesBeforeApply() {
     assertThrows(BadRequestException.class, () -> validate("```json {\"classes\":[]} ```"));
     assertThrows(BadRequestException.class, () -> validate("{\"classes\":[{\"name\":\"A\"}],\"relations\":[],\"warnings\":[]}"));
+    assertThrows(BadRequestException.class, () -> validate("{\"classes\":[],\"relations\":[],\"warnings\":[]} extra"));
+    assertThrows(BadRequestException.class, () -> validate("{\"classes\":[{\"name\":\"A\",\"type\":\"CLASE\",\"x\":null,\"y\":null,\"attributes\":[],\"methods\":[]}],\"relations\":[],\"warnings\":[]}"));
   }
 
   @Test

@@ -45,6 +45,7 @@ import { ApiTesterModal } from './ApiTesterModal'
 import { WorkspaceChrome } from './WorkspaceChrome'
 import { ConfirmModal } from './ConfirmModal'
 import { SparklesIcon, CodeIcon, ExchangeIcon } from './icons'
+import { normalizePendingOperations, replayPendingQueue, snapshotContentMatches, type OfflineAction } from './offlineQueue.mjs'
 
 const base = import.meta.env.VITE_API_BASE_URL !== undefined ? import.meta.env.VITE_API_BASE_URL : ''
 const NODE_TYPES = { umlClass: UmlClassNode }
@@ -281,16 +282,30 @@ async function request<T>(path: string, token: string, options: RequestInit = {}
   })
   if (!response.ok) {
     const body = await response.json().catch(() => ({}))
-    throw new Error(body.message ?? 'Error al comunicar con el servidor.')
+    throw new ApiRequestError(response.status, body.message ?? 'Error al comunicar con el servidor.')
   }
   return response.status === 204 ? (undefined as T) : (response.json() as Promise<T>)
 }
 
-interface PendingSyncAction {
-  id: string
-  type: 'SAVE_ELEMENT' | 'DELETE_ELEMENT' | 'SAVE_POSITIONS' | 'SAVE_RELATION' | 'DELETE_RELATION'
-  payload: any
-  timestamp: number
+class ApiRequestError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message)
+    this.name = 'ApiRequestError'
+  }
+}
+
+function pendingOperationStatus(error: unknown): string {
+  if (error instanceof ApiRequestError && error.status >= 400 && error.status < 500) {
+    return `El servidor rechazó la operación (HTTP ${error.status}): ${error.message}. Se conserva localmente como pendiente.`
+  }
+  if (error instanceof ApiRequestError) {
+    return `El servidor respondió HTTP ${error.status} sin confirmar el guardado. Se conserva localmente como pendiente.`
+  }
+  return 'No se recibió confirmación del servidor. El cambio se conserva localmente como pendiente.'
+}
+
+interface PendingSyncAction extends OfflineAction {
+  type: 'SAVE_ELEMENT' | 'UPDATE_ELEMENT' | 'DELETE_ELEMENT' | 'SAVE_POSITIONS' | 'SAVE_RELATION' | 'UPDATE_RELATION' | 'DELETE_RELATION'
 }
 
 function getOfflineQueue(diagramId: string): PendingSyncAction[] {
@@ -317,7 +332,7 @@ function appendOfflineQueue(
   const queue = getOfflineQueue(diagramId)
   queue.push({
     ...action,
-    id: 'sync_' + Math.random().toString(36).slice(2, 9),
+    id: crypto.randomUUID(),
     timestamp: Date.now()
   })
   setOfflineQueue(diagramId, queue)
@@ -337,6 +352,23 @@ function saveLocalDiagramSnapshot(
     )
   } catch {
     // Quota exceeded
+  }
+}
+
+function saveServerDiagramSnapshot(diagramId: string, snapshot: DiagramFullView) {
+  try {
+    localStorage.setItem(`case.server_snapshot.${diagramId}`, JSON.stringify(snapshot))
+  } catch {
+    // The server baseline is optional if browser storage is unavailable.
+  }
+}
+
+function loadServerDiagramSnapshot(diagramId: string): DiagramFullView | null {
+  try {
+    const raw = localStorage.getItem(`case.server_snapshot.${diagramId}`)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
   }
 }
 
@@ -456,7 +488,7 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
         (r) => r.elementoOrigen !== elementId && r.elementoDestino !== elementId
       )
 
-      if (!navigator.onLine) {
+      if (!navigator.onLine || getOfflineQueue(currentDiagram.id).length > 0) {
         setElementsRaw(nextElements)
         setRelationsRaw(nextRelations)
         saveLocalDiagramSnapshot(currentDiagram.id, currentDiagram, nextElements, nextRelations)
@@ -513,7 +545,7 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
       (r) => !selectedIdSet.has(r.elementoOrigen) && !selectedIdSet.has(r.elementoDestino)
     )
 
-    if (!navigator.onLine) {
+    if (!navigator.onLine || getOfflineQueue(currentDiagram.id).length > 0) {
       setElementsRaw(nextElements)
       setRelationsRaw(nextRelations)
       saveLocalDiagramSnapshot(currentDiagram.id, currentDiagram, nextElements, nextRelations)
@@ -702,6 +734,7 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
       setDiagram(full.diagram)
       setElementsRaw(full.elements)
       setRelationsRaw(full.relations)
+      saveServerDiagramSnapshot(full.diagram.id, full)
       setNodes(buildNodes(full.elements))
       setEdges(buildEdges(full.relations, full.elements))
     },
@@ -717,59 +750,92 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
       setIsSyncingQueue(true)
       setSavingStatus('Sincronizando...')
 
-      for (const action of queue) {
-        try {
-          if (action.type === 'SAVE_ELEMENT') {
-            await request(`/api/projects/${project.id}/diagrams/${diagramId}/elements`, auth.token, {
-              method: 'POST',
-              body: JSON.stringify(action.payload)
-            })
-          } else if (action.type === 'DELETE_ELEMENT') {
-            await request(
-              `/api/projects/${project.id}/diagrams/${diagramId}/elements/${action.payload.elementId}`,
-              auth.token,
-              { method: 'DELETE' }
-            )
-          } else if (action.type === 'SAVE_POSITIONS') {
-            await request(
-              `/api/projects/${project.id}/diagrams/${diagramId}/elements/positions`,
-              auth.token,
-              {
-                method: 'POST',
-                body: JSON.stringify(action.payload)
-              }
-            )
-          } else if (action.type === 'SAVE_RELATION') {
-            await request(`/api/projects/${project.id}/diagrams/${diagramId}/relations`, auth.token, {
-              method: 'POST',
-              body: JSON.stringify(action.payload)
-            })
-          } else if (action.type === 'DELETE_RELATION') {
-            await request(
-              `/api/projects/${project.id}/diagrams/${diagramId}/relations/${action.payload.relationId}`,
-              auth.token,
-              { method: 'DELETE' }
-            )
-          }
-        } catch (itemErr) {
-          console.warn('Error al sincronizar acción pendiente:', itemErr)
-        }
-      }
-
-      setOfflineQueue(diagramId, [])
-      setPendingQueueCount(0)
-
       try {
+        const serverBefore = await request<DiagramFullView>(
+          `/api/projects/${project.id}/diagrams/${diagramId}`,
+          auth.token
+        )
+        const baseline = loadServerDiagramSnapshot(diagramId)
+        if (!snapshotContentMatches(baseline, serverBefore)) {
+          const optimistic = loadLocalDiagramSnapshot(diagramId)
+          if (optimistic && snapshotContentMatches(optimistic, serverBefore)) {
+            setOfflineQueue(diagramId, [])
+            setPendingQueueCount(0)
+            setElementsRaw(serverBefore.elements)
+            setRelationsRaw(serverBefore.relations)
+            saveServerDiagramSnapshot(diagramId, serverBefore)
+            saveLocalDiagramSnapshot(diagramId, serverBefore.diagram, serverBefore.elements, serverBefore.relations)
+            setSavingStatus('Guardado')
+            return
+          }
+          setPendingQueueCount(getOfflineQueue(diagramId).length)
+          setSavingStatus('Error al sincronizar: el diagrama cambió en el servidor. Se conservaron los cambios locales; revisa el modelo antes de reintentar.')
+          return
+        }
+        if (!baseline) saveServerDiagramSnapshot(diagramId, serverBefore)
+
+        const normalizedQueue = normalizePendingOperations(queue, baseline)
+        setOfflineQueue(diagramId, normalizedQueue)
+        const replay = await replayPendingQueue(normalizedQueue, async (action) => {
+          try {
+            if (action.type === 'SAVE_ELEMENT' || action.type === 'UPDATE_ELEMENT') {
+              const update = action.type === 'UPDATE_ELEMENT'
+              const elementPath = `/api/projects/${project.id}/diagrams/${diagramId}/elements`
+              await request(update ? `${elementPath}/${action.payload.id}` : elementPath, auth.token, {
+                method: update ? 'PUT' : 'POST', body: JSON.stringify(action.payload)
+              })
+            } else if (action.type === 'DELETE_ELEMENT') {
+              await request(`/api/projects/${project.id}/diagrams/${diagramId}/elements/${action.payload.elementId}`,
+                auth.token, { method: 'DELETE' })
+            } else if (action.type === 'SAVE_POSITIONS') {
+              await request(`/api/projects/${project.id}/diagrams/${diagramId}/elements/positions`, auth.token, {
+                method: 'POST', body: JSON.stringify(action.payload)
+              })
+            } else if (action.type === 'SAVE_RELATION' || action.type === 'UPDATE_RELATION') {
+              const update = action.type === 'UPDATE_RELATION'
+              const relationPath = `/api/projects/${project.id}/diagrams/${diagramId}/relations`
+              await request(update ? `${relationPath}/${action.payload.id}` : relationPath, auth.token, {
+                method: update ? 'PUT' : 'POST', body: JSON.stringify(action.payload)
+              })
+            } else if (action.type === 'DELETE_RELATION') {
+              await request(`/api/projects/${project.id}/diagrams/${diagramId}/relations/${action.payload.relationId}`,
+                auth.token, { method: 'DELETE' })
+            }
+          } catch (error) {
+            // Si el borrado se aplicó pero se perdió la respuesta, repetirlo ya está satisfecho.
+            if ((action.type === 'DELETE_ELEMENT' || action.type === 'DELETE_RELATION') &&
+                error instanceof ApiRequestError && error.status === 404) return
+            throw error
+          }
+        })
+        const completed = new Set(replay.completedIds)
+        const pending = getOfflineQueue(diagramId).filter((action) => !completed.has(action.id))
+        setOfflineQueue(diagramId, pending)
+        setPendingQueueCount(pending.length)
+
+        if (replay.error) {
+          const detail = replay.error instanceof Error ? replay.error.message : 'Error de comunicación.'
+          setSavingStatus(`Error al sincronizar: ${pending.length} cambio(s) siguen guardados localmente. ${detail}`)
+          return
+        }
+
         const full = await request<DiagramFullView>(
           `/api/projects/${project.id}/diagrams/${diagramId}`,
           auth.token
         )
         setElementsRaw(full.elements)
         setRelationsRaw(full.relations)
+        saveServerDiagramSnapshot(diagramId, full)
         saveLocalDiagramSnapshot(diagramId, diagramRef.current, full.elements, full.relations)
-        setSavingStatus('Guardado')
-      } catch {
-        setSavingStatus('Guardado localmente')
+        setSavingStatus(pending.length ? `Sincronizado; ${pending.length} cambio(s) siguen pendientes` : 'Guardado')
+        if (pending.length) window.setTimeout(() => flushPendingQueue(diagramId), 3000)
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : 'Error de comunicación.'
+        const remaining = getOfflineQueue(diagramId).length
+        setPendingQueueCount(remaining)
+        setSavingStatus(remaining
+          ? `Error al sincronizar: ${remaining} cambio(s) se conservaron localmente. ${detail}`
+          : `Cambios sincronizados, pero no se pudo actualizar la vista del servidor. ${detail}`)
       } finally {
         setIsSyncingQueue(false)
       }
@@ -837,6 +903,7 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
         if (!isMounted) return
         setElementsRaw(full.elements)
         setRelationsRaw(full.relations)
+        saveServerDiagramSnapshot(def.id, full)
         saveLocalDiagramSnapshot(def.id, def, full.elements, full.relations)
         setPendingQueueCount(getOfflineQueue(def.id).length)
         setSavingStatus('Guardado')
@@ -886,7 +953,7 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
         if (base) {
           host = base.replace(/^https?:\/\//, '')
         }
-        ws = new WebSocket(`${protocol}//${host}/ws/diagrams/${currentDiagramId}`)
+        ws = new WebSocket(`${protocol}//${host}/ws/diagrams/${currentDiagramId}`, ['case-events-v1', `bearer.${auth.token}`])
 
         ws.onopen = () => {
           if (!isDestroyed) setWsConnected(true)
@@ -895,11 +962,12 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
         ws.onmessage = async (event) => {
           try {
             const data = JSON.parse(event.data)
-            if (data.diagramId === currentDiagramId && navigator.onLine) {
+            if (data.diagramId === currentDiagramId && navigator.onLine && getOfflineQueue(currentDiagramId).length === 0) {
               const full = await request<DiagramFullView>(
                 `/api/projects/${project.id}/diagrams/${currentDiagramId}`,
                 auth.token
               )
+              saveServerDiagramSnapshot(currentDiagramId, full)
               setDiagram(full.diagram)
               setElementsRaw((prev) => {
                 const prevStr = JSON.stringify(prev)
@@ -945,11 +1013,13 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
     if (!diagram?.id || !isOnline) return
     const interval = setInterval(async () => {
       if (!navigator.onLine) return
+      if (getOfflineQueue(diagram.id).length > 0) return
       try {
         const full = await request<DiagramFullView>(
           `/api/projects/${project.id}/diagrams/${diagram.id}`,
           auth.token
         )
+        saveServerDiagramSnapshot(diagram.id, full)
         setElementsRaw((prev) => {
           const prevStr = JSON.stringify(prev)
           const nextStr = JSON.stringify(full.elements)
@@ -1046,7 +1116,7 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
         return upd ? { ...e, posicionX: upd.posicionX, posicionY: upd.posicionY } : e
       })
 
-      if (!navigator.onLine) {
+      if (!navigator.onLine || getOfflineQueue(currentDiagram.id).length > 0) {
         setElementsRaw(nextElements)
         saveLocalDiagramSnapshot(currentDiagram.id, currentDiagram, nextElements, relationsRaw)
         const count = appendOfflineQueue(currentDiagram.id, {
@@ -1099,6 +1169,7 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
 
     const randomOffset = Math.floor(Math.random() * 80)
     const payload = {
+      id: crypto.randomUUID(),
       tipoElemento: tipo,
       nombre: nombreDefecto,
       posicionX: 180 + randomOffset,
@@ -1111,9 +1182,8 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
       })
     }
 
-    if (!navigator.onLine) {
+    if (!navigator.onLine || getOfflineQueue(diagram.id).length > 0) {
       const nuevo: ElementDetail = {
-        id: crypto.randomUUID(),
         diagramaId: diagram.id,
         ...payload
       }
@@ -1144,8 +1214,13 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
       saveLocalDiagramSnapshot(diagram.id, diagram, nextElements, relationsRaw)
       setSavingStatus('Guardado')
     } catch (err) {
-      onError(err)
-      setSavingStatus('Error al guardar')
+      const localElement: ElementDetail = { diagramaId: diagram.id, ...payload }
+      const nextElements = [...elementsRaw, localElement]
+      setElementsRaw(nextElements)
+      saveLocalDiagramSnapshot(diagram.id, diagram, nextElements, relationsRaw)
+      const count = appendOfflineQueue(diagram.id, { type: 'SAVE_ELEMENT', payload: localElement })
+      setPendingQueueCount(count)
+      setSavingStatus(pendingOperationStatus(err))
     }
   }
 
@@ -1169,11 +1244,11 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
       e.id === editingElement.id ? { ...e, ...payload } : e
     )
 
-    if (!navigator.onLine) {
+    if (!navigator.onLine || getOfflineQueue(diagram.id).length > 0) {
       setElementsRaw(nextElements)
       saveLocalDiagramSnapshot(diagram.id, diagram, nextElements, relationsRaw)
       const count = appendOfflineQueue(diagram.id, {
-        type: 'SAVE_ELEMENT',
+        type: 'UPDATE_ELEMENT',
         payload
       })
       setPendingQueueCount(count)
@@ -1185,10 +1260,10 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
     try {
       setSavingStatus('Guardando...')
       const saved = await request<ElementDetail>(
-        `/api/projects/${project.id}/diagrams/${diagram.id}/elements`,
+        `/api/projects/${project.id}/diagrams/${diagram.id}/elements/${payload.id}`,
         auth.token,
         {
-          method: 'POST',
+          method: 'PUT',
           body: JSON.stringify(payload)
         }
       )
@@ -1201,12 +1276,12 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
       setElementsRaw(nextElements)
       saveLocalDiagramSnapshot(diagram.id, diagram, nextElements, relationsRaw)
       const count = appendOfflineQueue(diagram.id, {
-        type: 'SAVE_ELEMENT',
+        type: 'UPDATE_ELEMENT',
         payload
       })
       setPendingQueueCount(count)
       setEditingElement(null)
-      setSavingStatus('Guardado localmente (Offline)')
+      setSavingStatus(pendingOperationStatus(err))
     }
   }
 
@@ -1260,6 +1335,7 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
   ) {
     if (!pendingConnection || !diagram) return
     const payload = {
+      id: crypto.randomUUID(),
       elementoOrigen: pendingConnection.source,
       elementoDestino: pendingConnection.target,
       nombreRelacion,
@@ -1268,9 +1344,9 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
       multiplicidadDestino
     }
 
-    if (!navigator.onLine) {
+    if (!navigator.onLine || getOfflineQueue(diagram.id).length > 0) {
       const localRel: RelationDetail = {
-        id: crypto.randomUUID(),
+        id: payload.id,
         diagramaId: diagram.id,
         elementoOrigen: pendingConnection.source,
         elementoDestino: pendingConnection.target,
@@ -1312,7 +1388,7 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
       setSavingStatus('Guardado')
     } catch (err) {
       const localRel: RelationDetail = {
-        id: crypto.randomUUID(),
+        id: payload.id,
         diagramaId: diagram.id,
         elementoOrigen: pendingConnection.source,
         elementoDestino: pendingConnection.target,
@@ -1331,7 +1407,7 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
       })
       setPendingQueueCount(count)
       setPendingConnection(null)
-      setSavingStatus('Guardado localmente (Offline)')
+      setSavingStatus(pendingOperationStatus(err))
     }
   }
 
@@ -1363,11 +1439,11 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
       r.id === editingRelation.id ? { ...r, ...payload } : r
     )
 
-    if (!navigator.onLine) {
+    if (!navigator.onLine || getOfflineQueue(diagram.id).length > 0) {
       setRelationsRaw(nextRels)
       saveLocalDiagramSnapshot(diagram.id, diagram, elementsRaw, nextRels)
       const count = appendOfflineQueue(diagram.id, {
-        type: 'SAVE_RELATION',
+        type: 'UPDATE_RELATION',
         payload
       })
       setPendingQueueCount(count)
@@ -1379,10 +1455,10 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
     try {
       setSavingStatus('Actualizando relación...')
       const saved = await request<RelationDetail>(
-        `/api/projects/${project.id}/diagrams/${diagram.id}/relations`,
+        `/api/projects/${project.id}/diagrams/${diagram.id}/relations/${payload.id}`,
         auth.token,
         {
-          method: 'POST',
+          method: 'PUT',
           body: JSON.stringify(payload)
         }
       )
@@ -1396,12 +1472,12 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
       setRelationsRaw(nextRels)
       saveLocalDiagramSnapshot(diagram.id, diagram, elementsRaw, nextRels)
       const count = appendOfflineQueue(diagram.id, {
-        type: 'SAVE_RELATION',
+        type: 'UPDATE_RELATION',
         payload
       })
       setPendingQueueCount(count)
       setEditingRelation(null)
-      setSavingStatus('Guardado localmente (Offline)')
+      setSavingStatus(pendingOperationStatus(err))
     }
   }
 
@@ -1410,7 +1486,7 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
     if (!editingRelation || !diagram) return
     const nextRels = relationsRaw.filter((r) => r.id !== editingRelation.id)
 
-    if (!navigator.onLine) {
+    if (!navigator.onLine || getOfflineQueue(diagram.id).length > 0) {
       setRelationsRaw(nextRels)
       saveLocalDiagramSnapshot(diagram.id, diagram, elementsRaw, nextRels)
       const count = appendOfflineQueue(diagram.id, {

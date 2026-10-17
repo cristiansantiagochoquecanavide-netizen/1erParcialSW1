@@ -95,7 +95,7 @@ class UmlServiceLockTest {
     ProjectMember member = new ProjectMember(project, project.getCreator(), ProjectRole.PROPIETARIO);
     when(projectService.requireCanEdit(projectId, userA)).thenReturn(member);
     when(diagrams.findById(diagramId)).thenReturn(Optional.of(diagram));
-    when(elements.save(any(ElementoUML.class))).thenAnswer(i -> i.getArgument(0));
+    when(elements.saveAndFlush(any(ElementoUML.class))).thenAnswer(i -> i.getArgument(0));
 
     SaveElement request = new SaveElement(
         null,

@@ -111,7 +111,18 @@ public class UmlController {
       Authentication auth,
       @Valid @RequestBody SaveElement request
   ) {
-    return service.saveElement(projectId, diagramId, auth.getName(), request);
+    return service.createElement(projectId, diagramId, auth.getName(), request);
+  }
+
+  @PutMapping("/{diagramId}/elements/{elementId}")
+  public ElementDetail updateElement(
+      @PathVariable UUID projectId,
+      @PathVariable UUID diagramId,
+      @PathVariable UUID elementId,
+      Authentication auth,
+      @Valid @RequestBody SaveElement request
+  ) {
+    return service.updateElement(projectId, diagramId, auth.getName(), elementId, request);
   }
 
   @PostMapping("/{diagramId}/elements/positions")
@@ -144,7 +155,18 @@ public class UmlController {
       Authentication auth,
       @Valid @RequestBody SaveRelation request
   ) {
-    return service.saveRelation(projectId, diagramId, auth.getName(), request);
+    return service.createRelation(projectId, diagramId, auth.getName(), request);
+  }
+
+  @PutMapping("/{diagramId}/relations/{relationId}")
+  public RelationDetail updateRelation(
+      @PathVariable UUID projectId,
+      @PathVariable UUID diagramId,
+      @PathVariable UUID relationId,
+      Authentication auth,
+      @Valid @RequestBody SaveRelation request
+  ) {
+    return service.updateRelation(projectId, diagramId, auth.getName(), relationId, request);
   }
 
   @DeleteMapping("/{diagramId}/relations/{relationId}")

@@ -16,11 +16,9 @@ import org.springframework.web.bind.annotation.*;
 @RequestMapping("/api/projects/{projectId}/diagrams/{diagramId}/generate")
 public class GeneratorController {
   private final CodeGeneratorService generatorService;
-  private final GeneracionSoftwareRepository genRepo;
 
-  public GeneratorController(CodeGeneratorService generatorService, GeneracionSoftwareRepository genRepo) {
+  public GeneratorController(CodeGeneratorService generatorService) {
     this.generatorService = generatorService;
-    this.genRepo = genRepo;
   }
 
   @PostMapping("/preview")
@@ -57,9 +55,6 @@ public class GeneratorController {
       @PathVariable UUID diagramId,
       Authentication auth
   ) {
-    return genRepo.findByDiagramaIdOrderByFechaDesc(diagramId)
-        .stream()
-        .map(g -> new GenerationHistoryItem(g.getId(), g.getTipoGeneracion(), g.getEstado(), g.getFecha()))
-        .toList();
+    return generatorService.history(projectId, diagramId, auth.getName());
   }
 }

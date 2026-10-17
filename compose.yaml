@@ -3,6 +3,8 @@ services:
     image: postgres:16-alpine
     container_name: proyecto-case-postgres
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-case_db}
       POSTGRES_USER: ${POSTGRES_USER:-case_user}

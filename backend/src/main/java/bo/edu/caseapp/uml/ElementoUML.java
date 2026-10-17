@@ -1,14 +1,17 @@
 package bo.edu.caseapp.uml;
 
 import jakarta.persistence.*;
+import org.springframework.data.domain.Persistable;
 import java.util.UUID;
 
 @Entity
 @Table(name = "elemento_uml")
-public class ElementoUML {
+public class ElementoUML implements Persistable<UUID> {
   @Id
-  @GeneratedValue
   private UUID id;
+
+  @Transient
+  private boolean newEntity = true;
 
   @ManyToOne(optional = false, fetch = FetchType.LAZY)
   @JoinColumn(name = "diagrama_id", nullable = false)
@@ -33,6 +36,7 @@ public class ElementoUML {
   protected ElementoUML() { }
 
   public ElementoUML(DiagramaClase diagrama, TipoElementoUML tipoElemento, String nombre, double posicionX, double posicionY, String propiedadesJson) {
+    this.id = UUID.randomUUID();
     this.diagrama = diagrama;
     this.tipoElemento = tipoElemento;
     this.nombre = nombre;
@@ -41,7 +45,14 @@ public class ElementoUML {
     this.propiedadesJson = propiedadesJson != null && !propiedadesJson.isBlank() ? propiedadesJson : "{}";
   }
 
-  public UUID getId() { return id; }
+  public ElementoUML(UUID id, DiagramaClase diagrama, TipoElementoUML tipoElemento, String nombre, double posicionX, double posicionY, String propiedadesJson) {
+    this(diagrama, tipoElemento, nombre, posicionX, posicionY, propiedadesJson);
+    this.id = id;
+  }
+
+  @Override public UUID getId() { return id; }
+  @Override @Transient public boolean isNew() { return newEntity; }
+  @PostLoad @PostPersist void markNotNew() { this.newEntity = false; }
   public DiagramaClase getDiagrama() { return diagrama; }
   public TipoElementoUML getTipoElemento() { return tipoElemento; }
   public String getNombre() { return nombre; }

@@ -90,7 +90,7 @@ public class AiAssistantService {
         .orElseThrow(() -> new NotFoundException("Usuario no encontrado."));
 
     if (!"GEMINI_CANONICAL".equals(request.resolvedSource()) && !looksLikeSqlDdl(request.command())) {
-      List<String> interpretedCommands = interpretCommandWithGemini(diagramId, request.command());
+      List<String> interpretedCommands = interpretCommandWithGemini(diagramId, email, request.command());
       if (interpretedCommands != null && !interpretedCommands.isEmpty()) {
         CommandResponse lastResponse = null;
         for (String interpretedCommand : interpretedCommands) {
@@ -683,16 +683,16 @@ public class AiAssistantService {
       try {
         String stage1Prompt = """
             ETAPA 1: Extrae únicamente las CLASES, INTERFACES, CLASES ABSTRACTAS y ENUMERACIONES visibles en la imagen.
-            No inventes nada nuevo ni completes el modelo. La imagen es la fuente de verdad.
+            No inventes nada nuevo ni completes el modelo. La imagen es la fuente de verdad. Si un nombre o tipo no se distingue, omite ese elemento y explica por qué en warnings.
             Para cada elemento extrae:
             - "name": nombre exacto tal como aparece impreso.
             - "type": "CLASE" | "INTERFAZ" | "CLASE_ABSTRACTA" | "ENUMERACION".
             - "confidence": número 0.5..1.0.
-            - "x": coordenada X estimada en lienzo (80 a 2400).
-            - "y": coordenada Y estimada en lienzo (60 a 1600).
-            - "attributes": arreglo de atributos [{ "name": "...", "type": "...", "visibility": "+"|"-"|"#"|"~", "confidence": 0.9 }].
-            - "methods": arreglo de métodos [{ "name": "...", "returnType": "...", "parameters": "...", "visibility": "+"|"-"|"#"|"~", "confidence": 0.9 }].
-            Devuelve ÚNICAMENTE un objeto JSON con la clave raíz "classes": [...]
+            - "x": coordenada X estimada en lienzo (80 a 2400), o null si no se estima.
+            - "y": coordenada Y estimada en lienzo (60 a 1600), o null si no se estima.
+            - "attributes": arreglo; cada atributo debe tener exactamente name,type,visibility,confidence. Usa null para tipo/visibilidad ilegibles.
+            - "methods": arreglo; cada método debe tener exactamente name,returnType,parameters,visibility,confidence. Usa null para datos ilegibles; parameters="" solo si la firma no muestra parámetros.
+            Cada clase debe tener exactamente name,type,confidence,x,y,attributes,methods. Devuelve ÚNICAMENTE JSON con exactamente las claves raíz classes y warnings.
             """ + (hint == null || hint.isBlank() ? "" : "\nPista de dominio: " + hint.trim());
 
         String stage1Text = callGeminiRaw(client, targetModel, apiKeyToUse, imageBase64, mimeType, stage1Prompt);
@@ -702,6 +702,9 @@ public class AiAssistantService {
 
           if (classesNode.isArray() && classesNode.size() > 0) {
             List<String> classNames = new ArrayList<>();
+            List<String> imageWarnings = new ArrayList<>();
+            JsonNode firstStageWarnings = stage1Json.path("warnings");
+            if (firstStageWarnings.isArray()) firstStageWarnings.forEach(w -> { if (w.isTextual() && !w.asText().isBlank()) imageWarnings.add(w.asText().trim()); });
             for (JsonNode c : classesNode) {
               String cn = c.path("name").asText("").trim();
               if (!cn.isBlank()) classNames.add(cn);
@@ -711,7 +714,8 @@ public class AiAssistantService {
                 ETAPA 2: Analiza minuciosamente TODAS las relaciones y conexiones en el diagrama de la imagen.
                 Las clases identificadas en la imagen son: """ + classNames + """
 
-                Instrucción crítica: Inspecciona TODOS los 4 lados de CADA caja de clase en busca de líneas conectoras (asociaciones, herencias, agregaciones, composiciones, dependencias).
+                Instrucción crítica: Inspecciona TODOS los 4 lados de CADA caja de clase en busca de líneas conectoras (asociaciones, herencias, agregaciones, composiciones, dependencias). Revisa visualmente ambos extremos de cada conector antes de decidir su tipo: un diamante negro/relleno identifica COMPOSICIÓN; un diamante blanco/vacío identifica AGREGACIÓN; un triángulo hueco que apunta a una clase identifica HERENCIA; una línea discontinua con punta abierta simple (sin triángulo de generalización) identifica DEPENDENCIA; una línea simple sin estos glifos es ASOCIACIÓN. No conviertas un conector con diamante o triángulo en asociación/dependencia.
+                En composición/agregación, source es la clase junto al diamante (el todo). En herencia, source es la subclase y target la clase a la que apunta el triángulo. En dependencia, source es la cola y target la punta. En asociación sin dirección, usa como source el extremo más a la izquierda (o más arriba si están alineados verticalmente). Las multiplicidades siempre se asignan por proximidad al extremo, no por orden de lectura.
                 Ten en cuenta que una sola clase (por ejemplo, Pago) puede tener MÚLTIPLES líneas de relación independientes hacia distintas clases (por ejemplo, Pago -> MetodoPago Y ADEMÁS Pago -> PasarelaPago). NO te detengas al encontrar 1 relación.
                 Para CADA línea conectora visible, extrae:
                 - "source": clase origen en el extremo inicial.
@@ -721,7 +725,8 @@ public class AiAssistantService {
                 - "multiplicitySource": multiplicidad exacta junto al origen (ej. "1", "*", "0..1", "1..*", "0..*") o null.
                 - "multiplicityTarget": multiplicidad exacta junto al destino (ej. "1", "*", "0..1", "1..*", "0..*") o null.
                 - "confidence": número 0.5..1.0.
-                Devuelve ÚNICAMENTE un objeto JSON con la clave raíz "relations": [...]
+                No asumas cardinalidades por defecto. Si el extremo, tipo o multiplicidad es incierto, omite esa relación o deja la multiplicidad null y explica la duda en warnings. Cada relación debe tener exactamente source,target,type,name,multiplicitySource,multiplicityTarget,confidence.
+                Devuelve ÚNICAMENTE JSON con exactamente las claves raíz relations y warnings.
                 """;
 
             String stage2Text = callGeminiRaw(client, targetModel, apiKeyToUse, imageBase64, mimeType, stage2Prompt);
@@ -729,12 +734,14 @@ public class AiAssistantService {
             if (stage2Text != null && !stage2Text.isBlank()) {
               JsonNode stage2Json = parseGeminiJsonNode(stage2Text);
               relationsNode = stage2Json.path("relations");
+              JsonNode secondStageWarnings = stage2Json.path("warnings");
+              if (secondStageWarnings.isArray()) secondStageWarnings.forEach(w -> { if (w.isTextual() && !w.asText().isBlank()) imageWarnings.add(w.asText().trim()); });
             }
 
             ObjectNode mergedRoot = objectMapper.createObjectNode();
             mergedRoot.set("classes", classesNode);
             mergedRoot.set("relations", relationsNode != null && relationsNode.isArray() ? relationsNode : objectMapper.createArrayNode());
-            mergedRoot.set("warnings", objectMapper.createArrayNode());
+            mergedRoot.set("warnings", objectMapper.valueToTree(imageWarnings));
 
             ImageModel model = UmlImageModelValidator.parseAndValidate(mergedRoot.toString());
             if (model != null && !model.classes().isEmpty()) {
@@ -758,6 +765,7 @@ public class AiAssistantService {
             Each class: name, type (CLASE|INTERFAZ|CLASE_ABSTRACTA|ENUMERACION), confidence (0..1), x and y (canvas coordinates x 80..2400, y 80..1600), attributes (array), methods (array).
             Each attribute: name, type, visibility (+|-|#|~), confidence (0..1). Each method: name, returnType, parameters, visibility (+|-|#|~), confidence (0..1).
             Each relation: source, target, type (ASOCIACION|HERENCIA|AGREGACION|COMPOSICION|DEPENDENCIA), name, multiplicitySource and multiplicityTarget (exact UML multiplicity like "1", "*", "0..1", "1..*"), confidence (0..1).
+            Relation glyph rules: a filled diamond means COMPOSICION; a hollow diamond means AGREGACION; a hollow triangle pointing to the parent means HERENCIA; a dashed line with a simple open arrow (no generalization triangle) means DEPENDENCIA; a plain connector is ASOCIACION. Inspect both ends and do not downgrade diamonds or triangles to association. For composition/aggregation source is the diamond end, for inheritance source is the child, for dependency source is the tail, and for undirected association choose the leftmost endpoint (uppermost if vertically aligned). Map each multiplicity to the class end nearest its label. Never assume a default multiplicity; use null and warn if unreadable. Omit unclear links and describe uncertainty in warnings.
             Keep Spanish identifiers exactly as printed. Do not output markdown code fences.
             """ + (hint == null || hint.isBlank() ? "" : "\nDomain hint: " + hint.trim());
 
@@ -1712,10 +1720,10 @@ public class AiAssistantService {
   }
 
   /** Interpreta lenguaje natural de CU10; el parser existente sigue ejecutando UML. */
-  private List<String> interpretCommandWithGemini(UUID diagramId, String userText) {
+  private List<String> interpretCommandWithGemini(UUID diagramId, String email, String userText) {
     if (geminiApiKey == null || geminiApiKey.isBlank() || userText == null || userText.isBlank()) return null;
     try {
-      String context = buildCommandContext(diagramId);
+      String context = buildCommandContext(diagramId, email);
       String prompt = """
           Eres el intérprete de lenguaje natural de un editor UML. No ejecutes operaciones y no devuelvas explicaciones.
           Devuelve únicamente JSON válido con esta forma: {"operaciones":[{...}]}.
@@ -1753,7 +1761,7 @@ public class AiAssistantService {
     }
   }
 
-  private String buildCommandContext(UUID diagramId) {
+  private String buildCommandContext(UUID diagramId, String email) {
     StringBuilder context = new StringBuilder();
     context.append("CLASES:\n");
     List<ElementoUML> elements = elementRepo.findByDiagramaId(diagramId);
@@ -1774,7 +1782,7 @@ public class AiAssistantService {
             .append(relation.getMultiplicidadDestino()).append("\n");
       }
     }
-    List<InteraccionIa> interactions = iaRepo.findByDiagramaIdOrderByFechaDesc(diagramId);
+    List<InteraccionIa> interactions = iaRepo.findByDiagramaIdAndUsuarioEmailIgnoreCaseOrderByFechaDesc(diagramId, email);
     if (interactions != null && !interactions.isEmpty()) {
       context.append("ÚLTIMAS OPERACIONES:\n");
       interactions.stream().limit(5).forEach(i -> context.append("- ").append(i.getEntradaUsuario()).append(" => ")

@@ -5,6 +5,7 @@ import bo.edu.caseapp.ai.AiRequests.CommandRequest;
 import bo.edu.caseapp.ai.AiResponses.ChatResponse;
 import bo.edu.caseapp.ai.AiResponses.CommandResponse;
 import bo.edu.caseapp.ai.AiResponses.InteractionHistoryItem;
+import bo.edu.caseapp.uml.UmlService;
 import jakarta.validation.Valid;
 import java.util.List;
 import java.util.UUID;
@@ -16,10 +17,12 @@ import org.springframework.web.bind.annotation.*;
 public class AiController {
   private final AiAssistantService aiService;
   private final InteraccionIaRepository iaRepo;
+  private final UmlService umlService;
 
-  public AiController(AiAssistantService aiService, InteraccionIaRepository iaRepo) {
+  public AiController(AiAssistantService aiService, InteraccionIaRepository iaRepo, UmlService umlService) {
     this.aiService = aiService;
     this.iaRepo = iaRepo;
+    this.umlService = umlService;
   }
 
   @PostMapping("/command")
@@ -68,9 +71,12 @@ public class AiController {
       @PathVariable UUID diagramId,
       Authentication auth
   ) {
-    return iaRepo.findByDiagramaIdOrderByFechaDesc(diagramId)
+    String email = auth.getName();
+    umlService.requireDiagramAccess(projectId, diagramId, email);
+    return iaRepo.findByDiagramaIdAndUsuarioEmailIgnoreCaseOrderByFechaDesc(diagramId, email)
         .stream()
-        .map(i -> new InteractionHistoryItem(i.getId(), i.getTipoInteraccion(), i.getEntradaUsuario(), i.getRespuestaAgente(), i.getFecha()))
+        .map(i -> new InteractionHistoryItem(i.getId(), i.getUsuario().getId(), i.getUsuario().getName(),
+            i.getTipoInteraccion(), i.getEntradaUsuario(), i.getRespuestaAgente(), i.getFecha()))
         .toList();
   }
 }
