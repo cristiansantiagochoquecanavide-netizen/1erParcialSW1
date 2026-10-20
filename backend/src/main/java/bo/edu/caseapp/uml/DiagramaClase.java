@@ -37,12 +37,20 @@ public class DiagramaClase {
   @Column(name = "fecha_bloqueo")
   private Instant fechaBloqueo;
 
+  @Column(name = "revision", nullable = false)
+  private long revision = 1L;
+
   protected DiagramaClase() { }
 
   public DiagramaClase(Project project, String nombre, String descripcion) {
+    this(project, nombre, descripcion, 1L);
+  }
+
+  public DiagramaClase(Project project, String nombre, String descripcion, long revision) {
     this.project = project;
     this.nombre = nombre;
     this.descripcion = descripcion;
+    this.revision = revision;
   }
 
   public UUID getId() { return id; }
@@ -51,6 +59,8 @@ public class DiagramaClase {
   public String getDescripcion() { return descripcion; }
   public String getEstado() { return estado; }
   public Instant getFechaCreacion() { return fechaCreacion; }
+  public long getRevision() { return revision; }
+  public void setRevision(long revision) { this.revision = revision; }
 
   public boolean isBloqueado() {
     if (!bloqueado) return false;

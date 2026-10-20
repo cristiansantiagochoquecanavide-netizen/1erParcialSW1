@@ -24,6 +24,10 @@ app:
   jwt:
     secret: ${JWT_SECRET:change-this-development-secret-to-a-safe-32-byte-minimum}
     expiration-minutes: ${JWT_EXPIRATION_MINUTES:480}
-  gemini:
-    api-key: ${GEMINI_API_KEY:}
-    model: ${GEMINI_MODEL:gemini-3.8-flash}
+  ai:
+    provider: ${AI_PROVIDER:groq}
+  groq:
+    api-key: ${GROQ_API_KEY:}
+    model: ${GROQ_MODEL:qwen/qwen3.8-27b}
+    base-url: ${GROQ_BASE_URL:https://api.groq.com/openai/v1}
+    timeout-seconds: ${GROQ_TIMEOUT_SECONDS:30}

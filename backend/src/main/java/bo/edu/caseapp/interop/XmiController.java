@@ -35,9 +35,17 @@ public class XmiController {
       @PathVariable UUID projectId,
       @PathVariable UUID diagramId,
       Authentication auth,
-      @RequestBody String xmlContent
+      @RequestBody String xmlContent,
+      @RequestHeader(value = "X-Diagram-Revision", required = false) Long revisionHeader,
+      @RequestHeader(value = "If-Match", required = false) String ifMatch,
+      jakarta.servlet.http.HttpServletResponse response
   ) {
-    return xmiService.importXmi(projectId, diagramId, auth.getName(), xmlContent);
+    Long expectedRev = requireExpectedRevision(revisionHeader, ifMatch);
+    DiagramFullView view = xmiService.importXmi(projectId, diagramId, auth.getName(), xmlContent, expectedRev);
+    if (view.diagram() != null) {
+      response.setHeader("X-Diagram-Revision", String.valueOf(view.diagram().revision()));
+    }
+    return view;
   }
 
   @GetMapping("/export-json")
@@ -58,8 +66,27 @@ public class XmiController {
       @PathVariable UUID projectId,
       @PathVariable UUID diagramId,
       Authentication auth,
-      @RequestBody String jsonContent
+      @RequestBody String jsonContent,
+      @RequestHeader(value = "X-Diagram-Revision", required = false) Long revisionHeader,
+      @RequestHeader(value = "If-Match", required = false) String ifMatch,
+      jakarta.servlet.http.HttpServletResponse response
   ) {
-    return xmiService.importJson(projectId, diagramId, auth.getName(), jsonContent);
+    Long expectedRev = requireExpectedRevision(revisionHeader, ifMatch);
+    DiagramFullView view = xmiService.importJson(projectId, diagramId, auth.getName(), jsonContent, expectedRev);
+    if (view.diagram() != null) {
+      response.setHeader("X-Diagram-Revision", String.valueOf(view.diagram().revision()));
+    }
+    return view;
+  }
+
+  private Long requireExpectedRevision(Long headerRevision, String ifMatch) {
+    if (headerRevision != null) return headerRevision;
+    if (ifMatch != null && !ifMatch.isBlank()) {
+      try {
+        return Long.parseLong(ifMatch.replace("\"", "").trim());
+      } catch (NumberFormatException ignored) {}
+    }
+    throw new bo.edu.caseapp.error.BadRequestException(
+        "Se requiere la revisión esperada del diagrama ('X-Diagram-Revision' o 'If-Match') para verificar la concurrencia optimista.");
   }
 }

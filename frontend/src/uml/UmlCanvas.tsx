@@ -270,7 +270,12 @@ function ReflexiveOrthogonalEdge({
 
 const EDGE_TYPES = { umlReflexive: ReflexiveOrthogonalEdge, umlOrthogonal: UmlOrthogonalEdge }
 
-async function request<T>(path: string, token: string, options: RequestInit = {}): Promise<T> {
+interface ApiResponse<T> {
+  data: T
+  revision: number | null
+}
+
+async function requestFull<T>(path: string, token: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
   const url = base ? `${base}${path}` : path
   const response = await fetch(url, {
     ...options,
@@ -284,7 +289,15 @@ async function request<T>(path: string, token: string, options: RequestInit = {}
     const body = await response.json().catch(() => ({}))
     throw new ApiRequestError(response.status, body.message ?? 'Error al comunicar con el servidor.')
   }
-  return response.status === 204 ? (undefined as T) : (response.json() as Promise<T>)
+  const revHeader = response.headers.get('X-Diagram-Revision')
+  const revision = revHeader ? parseInt(revHeader, 10) : null
+  const data = response.status === 204 ? (undefined as T) : ((await response.json()) as T)
+  return { data, revision }
+}
+
+async function request<T>(path: string, token: string, options: RequestInit = {}): Promise<T> {
+  const res = await requestFull<T>(path, token, options)
+  return res.data
 }
 
 class ApiRequestError extends Error {
@@ -327,13 +340,15 @@ function setOfflineQueue(diagramId: string, queue: PendingSyncAction[]) {
 
 function appendOfflineQueue(
   diagramId: string,
-  action: Omit<PendingSyncAction, 'id' | 'timestamp'>
+  action: Omit<PendingSyncAction, 'id' | 'timestamp'>,
+  expectedRevision?: number | null
 ): number {
   const queue = getOfflineQueue(diagramId)
   queue.push({
     ...action,
     id: crypto.randomUUID(),
-    timestamp: Date.now()
+    timestamp: Date.now(),
+    expectedRevision: expectedRevision !== undefined ? expectedRevision : ((action as any).expectedRevision ?? null)
   })
   setOfflineQueue(diagramId, queue)
   return queue.length
@@ -492,10 +507,14 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
         setElementsRaw(nextElements)
         setRelationsRaw(nextRelations)
         saveLocalDiagramSnapshot(currentDiagram.id, currentDiagram, nextElements, nextRelations)
-        const count = appendOfflineQueue(currentDiagram.id, {
-          type: 'DELETE_ELEMENT',
-          payload: { elementId }
-        })
+        const count = appendOfflineQueue(
+          currentDiagram.id,
+          {
+            type: 'DELETE_ELEMENT',
+            payload: { elementId }
+          },
+          currentDiagram.revision
+        )
         setPendingQueueCount(count)
         setSavingStatus('Guardado localmente (Offline)')
         return
@@ -503,21 +522,45 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
 
       try {
         setSavingStatus('Guardando...')
+        const headers: Record<string, string> =
+          currentDiagram.revision != null ? { 'X-Diagram-Revision': String(currentDiagram.revision) } : {}
         await request(`/api/projects/${project.id}/diagrams/${currentDiagram.id}/elements/${elementId}`, auth.token, {
-          method: 'DELETE'
+          method: 'DELETE',
+          headers
         })
         setElementsRaw(nextElements)
         setRelationsRaw(nextRelations)
+        if (currentDiagram.revision != null) {
+          setDiagram((prev) => (prev ? { ...prev, revision: (prev.revision ?? 0) + 1 } : prev))
+        }
         saveLocalDiagramSnapshot(currentDiagram.id, currentDiagram, nextElements, nextRelations)
         setSavingStatus('Guardado')
       } catch (err) {
+        if (err instanceof ApiRequestError && err.status === 409) {
+          const full = await request<DiagramFullView>(
+            `/api/projects/${project.id}/diagrams/${currentDiagram.id}`,
+            auth.token
+          ).catch(() => null)
+          if (full) {
+            setDiagram(full.diagram)
+            setElementsRaw(full.elements)
+            setRelationsRaw(full.relations)
+            saveServerDiagramSnapshot(currentDiagram.id, full)
+          }
+          setSavingStatus('Conflicto de concurrencia: el diagrama cambió en el servidor (HTTP 409).')
+          return
+        }
         setElementsRaw(nextElements)
         setRelationsRaw(nextRelations)
         saveLocalDiagramSnapshot(currentDiagram.id, currentDiagram, nextElements, nextRelations)
-        const count = appendOfflineQueue(currentDiagram.id, {
-          type: 'DELETE_ELEMENT',
-          payload: { elementId }
-        })
+        const count = appendOfflineQueue(
+          currentDiagram.id,
+          {
+            type: 'DELETE_ELEMENT',
+            payload: { elementId }
+          },
+          currentDiagram.revision
+        )
         setPendingQueueCount(count)
         setSavingStatus('Guardado localmente (Offline)')
       }
@@ -551,10 +594,14 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
       saveLocalDiagramSnapshot(currentDiagram.id, currentDiagram, nextElements, nextRelations)
       let count = 0
       for (const elementId of selectedIds) {
-        count = appendOfflineQueue(currentDiagram.id, {
-          type: 'DELETE_ELEMENT',
-          payload: { elementId }
-        })
+        count = appendOfflineQueue(
+          currentDiagram.id,
+          {
+            type: 'DELETE_ELEMENT',
+            payload: { elementId }
+          },
+          currentDiagram.revision
+        )
       }
       setPendingQueueCount(count)
       setSavingStatus('Guardado localmente (Offline)')
@@ -563,27 +610,50 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
 
     try {
       setSavingStatus('Eliminando seleccionados...')
+      const headers: Record<string, string> =
+        currentDiagram.revision != null ? { 'X-Diagram-Revision': String(currentDiagram.revision) } : {}
       for (const elementId of selectedIds) {
         await request(
           `/api/projects/${project.id}/diagrams/${currentDiagram.id}/elements/${elementId}`,
           auth.token,
-          { method: 'DELETE' }
+          { method: 'DELETE', headers }
         )
       }
       setElementsRaw(nextElements)
       setRelationsRaw(nextRelations)
+      if (currentDiagram.revision != null) {
+        setDiagram((prev) => (prev ? { ...prev, revision: (prev.revision ?? 0) + 1 } : prev))
+      }
       saveLocalDiagramSnapshot(currentDiagram.id, currentDiagram, nextElements, nextRelations)
       setSavingStatus('Guardado')
     } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 409) {
+        const full = await request<DiagramFullView>(
+          `/api/projects/${project.id}/diagrams/${currentDiagram.id}`,
+          auth.token
+        ).catch(() => null)
+        if (full) {
+          setDiagram(full.diagram)
+          setElementsRaw(full.elements)
+          setRelationsRaw(full.relations)
+          saveServerDiagramSnapshot(currentDiagram.id, full)
+        }
+        setSavingStatus('Conflicto de concurrencia: el diagrama cambió en el servidor (HTTP 409).')
+        return
+      }
       setElementsRaw(nextElements)
       setRelationsRaw(nextRelations)
       saveLocalDiagramSnapshot(currentDiagram.id, currentDiagram, nextElements, nextRelations)
       let count = 0
       for (const elementId of selectedIds) {
-        count = appendOfflineQueue(currentDiagram.id, {
-          type: 'DELETE_ELEMENT',
-          payload: { elementId }
-        })
+        count = appendOfflineQueue(
+          currentDiagram.id,
+          {
+            type: 'DELETE_ELEMENT',
+            payload: { elementId }
+          },
+          currentDiagram.revision
+        )
       }
       setPendingQueueCount(count)
       setSavingStatus('Guardado localmente (Offline)')
@@ -776,30 +846,51 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
 
         const normalizedQueue = normalizePendingOperations(queue, baseline)
         setOfflineQueue(diagramId, normalizedQueue)
+        let currentRevision = serverBefore.diagram.revision ?? 1
         const replay = await replayPendingQueue(normalizedQueue, async (action) => {
+          const revHeaders: Record<string, string> = {
+            'X-Diagram-Revision': String(currentRevision)
+          }
           try {
+            let resRev: number | null = null
             if (action.type === 'SAVE_ELEMENT' || action.type === 'UPDATE_ELEMENT') {
               const update = action.type === 'UPDATE_ELEMENT'
               const elementPath = `/api/projects/${project.id}/diagrams/${diagramId}/elements`
-              await request(update ? `${elementPath}/${action.payload.id}` : elementPath, auth.token, {
-                method: update ? 'PUT' : 'POST', body: JSON.stringify(action.payload)
+              const res = await requestFull(update ? `${elementPath}/${action.payload.id}` : elementPath, auth.token, {
+                method: update ? 'PUT' : 'POST',
+                headers: revHeaders,
+                body: JSON.stringify({ ...action.payload, expectedRevision: currentRevision })
               })
+              resRev = res.revision
             } else if (action.type === 'DELETE_ELEMENT') {
-              await request(`/api/projects/${project.id}/diagrams/${diagramId}/elements/${action.payload.elementId}`,
-                auth.token, { method: 'DELETE' })
+              const res = await requestFull(`/api/projects/${project.id}/diagrams/${diagramId}/elements/${action.payload.elementId}`,
+                auth.token, { method: 'DELETE', headers: revHeaders })
+              resRev = res.revision
             } else if (action.type === 'SAVE_POSITIONS') {
-              await request(`/api/projects/${project.id}/diagrams/${diagramId}/elements/positions`, auth.token, {
-                method: 'POST', body: JSON.stringify(action.payload)
+              const res = await requestFull(`/api/projects/${project.id}/diagrams/${diagramId}/elements/positions`, auth.token, {
+                method: 'POST',
+                headers: revHeaders,
+                body: JSON.stringify({ ...action.payload, expectedRevision: currentRevision })
               })
+              resRev = res.revision
             } else if (action.type === 'SAVE_RELATION' || action.type === 'UPDATE_RELATION') {
               const update = action.type === 'UPDATE_RELATION'
               const relationPath = `/api/projects/${project.id}/diagrams/${diagramId}/relations`
-              await request(update ? `${relationPath}/${action.payload.id}` : relationPath, auth.token, {
-                method: update ? 'PUT' : 'POST', body: JSON.stringify(action.payload)
+              const res = await requestFull(update ? `${relationPath}/${action.payload.id}` : relationPath, auth.token, {
+                method: update ? 'PUT' : 'POST',
+                headers: revHeaders,
+                body: JSON.stringify({ ...action.payload, expectedRevision: currentRevision })
               })
+              resRev = res.revision
             } else if (action.type === 'DELETE_RELATION') {
-              await request(`/api/projects/${project.id}/diagrams/${diagramId}/relations/${action.payload.relationId}`,
-                auth.token, { method: 'DELETE' })
+              const res = await requestFull(`/api/projects/${project.id}/diagrams/${diagramId}/relations/${action.payload.relationId}`,
+                auth.token, { method: 'DELETE', headers: revHeaders })
+              resRev = res.revision
+            }
+            if (resRev != null && !isNaN(resRev)) {
+              currentRevision = resRev
+            } else {
+              currentRevision++
             }
           } catch (error) {
             // Si el borrado se aplicó pero se perdió la respuesta, repetirlo ya está satisfecho.
@@ -814,6 +905,20 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
         setPendingQueueCount(pending.length)
 
         if (replay.error) {
+          if (replay.error instanceof ApiRequestError && replay.error.status === 409) {
+            const full = await request<DiagramFullView>(
+              `/api/projects/${project.id}/diagrams/${diagramId}`,
+              auth.token
+            ).catch(() => null)
+            if (full) {
+              saveServerDiagramSnapshot(diagramId, full)
+              setDiagram(full.diagram)
+              setElementsRaw(full.elements)
+              setRelationsRaw(full.relations)
+            }
+            setSavingStatus(`Conflicto de concurrencia: el diagrama cambió en el servidor (HTTP 409). Se conservaron ${pending.length} cambio(s) locales; revísalos antes de reintentar.`)
+            return
+          }
           const detail = replay.error instanceof Error ? replay.error.message : 'Error de comunicación.'
           setSavingStatus(`Error al sincronizar: ${pending.length} cambio(s) siguen guardados localmente. ${detail}`)
           return
@@ -1119,10 +1224,14 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
       if (!navigator.onLine || getOfflineQueue(currentDiagram.id).length > 0) {
         setElementsRaw(nextElements)
         saveLocalDiagramSnapshot(currentDiagram.id, currentDiagram, nextElements, relationsRaw)
-        const count = appendOfflineQueue(currentDiagram.id, {
-          type: 'SAVE_POSITIONS',
-          payload: { positions }
-        })
+        const count = appendOfflineQueue(
+          currentDiagram.id,
+          {
+            type: 'SAVE_POSITIONS',
+            payload: { positions }
+          },
+          currentDiagram.revision
+        )
         setPendingQueueCount(count)
         setSavingStatus('Guardado localmente (Offline)')
         return
@@ -1130,24 +1239,48 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
 
       try {
         setSavingStatus('Sincronizando...')
+        const headers: Record<string, string> =
+          currentDiagram.revision != null ? { 'X-Diagram-Revision': String(currentDiagram.revision) } : {}
         await request(
           `/api/projects/${project.id}/diagrams/${currentDiagram.id}/elements/positions`,
           auth.token,
           {
             method: 'POST',
-            body: JSON.stringify({ positions })
+            headers,
+            body: JSON.stringify({ positions, expectedRevision: currentDiagram.revision })
           }
         )
         setElementsRaw(nextElements)
+        if (currentDiagram.revision != null) {
+          setDiagram((prev) => (prev ? { ...prev, revision: (prev.revision ?? 0) + 1 } : prev))
+        }
         saveLocalDiagramSnapshot(currentDiagram.id, currentDiagram, nextElements, relationsRaw)
         setSavingStatus('Guardado')
       } catch (err) {
+        if (err instanceof ApiRequestError && err.status === 409) {
+          const full = await request<DiagramFullView>(
+            `/api/projects/${project.id}/diagrams/${currentDiagram.id}`,
+            auth.token
+          ).catch(() => null)
+          if (full) {
+            setDiagram(full.diagram)
+            setElementsRaw(full.elements)
+            setRelationsRaw(full.relations)
+            saveServerDiagramSnapshot(currentDiagram.id, full)
+          }
+          setSavingStatus('Conflicto de concurrencia al mover posiciones (HTTP 409).')
+          return
+        }
         setElementsRaw(nextElements)
         saveLocalDiagramSnapshot(currentDiagram.id, currentDiagram, nextElements, relationsRaw)
-        const count = appendOfflineQueue(currentDiagram.id, {
-          type: 'SAVE_POSITIONS',
-          payload: { positions }
-        })
+        const count = appendOfflineQueue(
+          currentDiagram.id,
+          {
+            type: 'SAVE_POSITIONS',
+            payload: { positions }
+          },
+          currentDiagram.revision
+        )
         setPendingQueueCount(count)
         setSavingStatus('Guardado localmente (Offline)')
       }
@@ -1190,10 +1323,14 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
       const nextElements = [...elementsRaw, nuevo]
       setElementsRaw(nextElements)
       saveLocalDiagramSnapshot(diagram.id, diagram, nextElements, relationsRaw)
-      const count = appendOfflineQueue(diagram.id, {
-        type: 'SAVE_ELEMENT',
-        payload: nuevo
-      })
+      const count = appendOfflineQueue(
+        diagram.id,
+        {
+          type: 'SAVE_ELEMENT',
+          payload: nuevo
+        },
+        diagram.revision
+      )
       setPendingQueueCount(count)
       setSavingStatus('Guardado localmente (Offline)')
       return
@@ -1201,24 +1338,48 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
 
     try {
       setSavingStatus('Guardando...')
+      const headers: Record<string, string> =
+        diagram.revision != null ? { 'X-Diagram-Revision': String(diagram.revision) } : {}
       const saved = await request<ElementDetail>(
         `/api/projects/${project.id}/diagrams/${diagram.id}/elements`,
         auth.token,
         {
           method: 'POST',
-          body: JSON.stringify(payload)
+          headers,
+          body: JSON.stringify({ ...payload, expectedRevision: diagram.revision })
         }
       )
       const nextElements = [...elementsRaw, saved]
       setElementsRaw(nextElements)
+      if (diagram.revision != null) {
+        setDiagram((prev) => (prev ? { ...prev, revision: (prev.revision ?? 0) + 1 } : prev))
+      }
       saveLocalDiagramSnapshot(diagram.id, diagram, nextElements, relationsRaw)
       setSavingStatus('Guardado')
     } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 409) {
+        const full = await request<DiagramFullView>(
+          `/api/projects/${project.id}/diagrams/${diagram.id}`,
+          auth.token
+        ).catch(() => null)
+        if (full) {
+          setDiagram(full.diagram)
+          setElementsRaw(full.elements)
+          setRelationsRaw(full.relations)
+          saveServerDiagramSnapshot(diagram.id, full)
+        }
+        setSavingStatus('Conflicto de concurrencia: el diagrama cambió en el servidor (HTTP 409).')
+        return
+      }
       const localElement: ElementDetail = { diagramaId: diagram.id, ...payload }
       const nextElements = [...elementsRaw, localElement]
       setElementsRaw(nextElements)
       saveLocalDiagramSnapshot(diagram.id, diagram, nextElements, relationsRaw)
-      const count = appendOfflineQueue(diagram.id, { type: 'SAVE_ELEMENT', payload: localElement })
+      const count = appendOfflineQueue(
+        diagram.id,
+        { type: 'SAVE_ELEMENT', payload: localElement },
+        diagram.revision
+      )
       setPendingQueueCount(count)
       setSavingStatus(pendingOperationStatus(err))
     }
@@ -1247,10 +1408,14 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
     if (!navigator.onLine || getOfflineQueue(diagram.id).length > 0) {
       setElementsRaw(nextElements)
       saveLocalDiagramSnapshot(diagram.id, diagram, nextElements, relationsRaw)
-      const count = appendOfflineQueue(diagram.id, {
-        type: 'UPDATE_ELEMENT',
-        payload
-      })
+      const count = appendOfflineQueue(
+        diagram.id,
+        {
+          type: 'UPDATE_ELEMENT',
+          payload
+        },
+        diagram.revision
+      )
       setPendingQueueCount(count)
       setEditingElement(null)
       setSavingStatus('Guardado localmente (Offline)')
@@ -1259,26 +1424,51 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
 
     try {
       setSavingStatus('Guardando...')
+      const headers: Record<string, string> =
+        diagram.revision != null ? { 'X-Diagram-Revision': String(diagram.revision) } : {}
       const saved = await request<ElementDetail>(
         `/api/projects/${project.id}/diagrams/${diagram.id}/elements/${payload.id}`,
         auth.token,
         {
           method: 'PUT',
-          body: JSON.stringify(payload)
+          headers,
+          body: JSON.stringify({ ...payload, expectedRevision: diagram.revision })
         }
       )
       const updatedElements = elementsRaw.map((e) => (e.id === saved.id ? saved : e))
       setElementsRaw(updatedElements)
+      if (diagram.revision != null) {
+        setDiagram((prev) => (prev ? { ...prev, revision: (prev.revision ?? 0) + 1 } : prev))
+      }
       saveLocalDiagramSnapshot(diagram.id, diagram, updatedElements, relationsRaw)
       setEditingElement(null)
       setSavingStatus('Guardado')
     } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 409) {
+        const full = await request<DiagramFullView>(
+          `/api/projects/${project.id}/diagrams/${diagram.id}`,
+          auth.token
+        ).catch(() => null)
+        if (full) {
+          setDiagram(full.diagram)
+          setElementsRaw(full.elements)
+          setRelationsRaw(full.relations)
+          saveServerDiagramSnapshot(diagram.id, full)
+        }
+        setEditingElement(null)
+        setSavingStatus('Conflicto de concurrencia: el diagrama cambió en el servidor (HTTP 409).')
+        return
+      }
       setElementsRaw(nextElements)
       saveLocalDiagramSnapshot(diagram.id, diagram, nextElements, relationsRaw)
-      const count = appendOfflineQueue(diagram.id, {
-        type: 'UPDATE_ELEMENT',
-        payload
-      })
+      const count = appendOfflineQueue(
+        diagram.id,
+        {
+          type: 'UPDATE_ELEMENT',
+          payload
+        },
+        diagram.revision
+      )
       setPendingQueueCount(count)
       setEditingElement(null)
       setSavingStatus(pendingOperationStatus(err))
@@ -1359,10 +1549,14 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
       rememberRelationHandles(localRel.id, pendingConnection)
       setRelationsRaw(nextRels)
       saveLocalDiagramSnapshot(diagram.id, diagram, elementsRaw, nextRels)
-      const count = appendOfflineQueue(diagram.id, {
-        type: 'SAVE_RELATION',
-        payload
-      })
+      const count = appendOfflineQueue(
+        diagram.id,
+        {
+          type: 'SAVE_RELATION',
+          payload
+        },
+        diagram.revision
+      )
       setPendingQueueCount(count)
       setPendingConnection(null)
       setSavingStatus('Guardado localmente (Offline)')
@@ -1371,22 +1565,43 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
 
     try {
       setSavingStatus('Guardando relación...')
+      const headers: Record<string, string> =
+        diagram.revision != null ? { 'X-Diagram-Revision': String(diagram.revision) } : {}
       const saved = await request<RelationDetail>(
         `/api/projects/${project.id}/diagrams/${diagram.id}/relations`,
         auth.token,
         {
           method: 'POST',
-          body: JSON.stringify(payload)
+          headers,
+          body: JSON.stringify({ ...payload, expectedRevision: diagram.revision })
         }
       )
 
       const nextRels = [...relationsRaw, saved]
       rememberRelationHandles(saved.id, pendingConnection)
       setRelationsRaw(nextRels)
+      if (diagram.revision != null) {
+        setDiagram((prev) => (prev ? { ...prev, revision: (prev.revision ?? 0) + 1 } : prev))
+      }
       saveLocalDiagramSnapshot(diagram.id, diagram, elementsRaw, nextRels)
       setPendingConnection(null)
       setSavingStatus('Guardado')
     } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 409) {
+        const full = await request<DiagramFullView>(
+          `/api/projects/${project.id}/diagrams/${diagram.id}`,
+          auth.token
+        ).catch(() => null)
+        if (full) {
+          setDiagram(full.diagram)
+          setElementsRaw(full.elements)
+          setRelationsRaw(full.relations)
+          saveServerDiagramSnapshot(diagram.id, full)
+        }
+        setPendingConnection(null)
+        setSavingStatus('Conflicto de concurrencia: el diagrama cambió en el servidor (HTTP 409).')
+        return
+      }
       const localRel: RelationDetail = {
         id: payload.id,
         diagramaId: diagram.id,
@@ -1401,10 +1616,14 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
       rememberRelationHandles(localRel.id, pendingConnection)
       setRelationsRaw(nextRels)
       saveLocalDiagramSnapshot(diagram.id, diagram, elementsRaw, nextRels)
-      const count = appendOfflineQueue(diagram.id, {
-        type: 'SAVE_RELATION',
-        payload
-      })
+      const count = appendOfflineQueue(
+        diagram.id,
+        {
+          type: 'SAVE_RELATION',
+          payload
+        },
+        diagram.revision
+      )
       setPendingQueueCount(count)
       setPendingConnection(null)
       setSavingStatus(pendingOperationStatus(err))
@@ -1442,10 +1661,14 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
     if (!navigator.onLine || getOfflineQueue(diagram.id).length > 0) {
       setRelationsRaw(nextRels)
       saveLocalDiagramSnapshot(diagram.id, diagram, elementsRaw, nextRels)
-      const count = appendOfflineQueue(diagram.id, {
-        type: 'UPDATE_RELATION',
-        payload
-      })
+      const count = appendOfflineQueue(
+        diagram.id,
+        {
+          type: 'UPDATE_RELATION',
+          payload
+        },
+        diagram.revision
+      )
       setPendingQueueCount(count)
       setEditingRelation(null)
       setSavingStatus('Guardado localmente (Offline)')
@@ -1454,27 +1677,52 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
 
     try {
       setSavingStatus('Actualizando relación...')
+      const headers: Record<string, string> =
+        diagram.revision != null ? { 'X-Diagram-Revision': String(diagram.revision) } : {}
       const saved = await request<RelationDetail>(
         `/api/projects/${project.id}/diagrams/${diagram.id}/relations/${payload.id}`,
         auth.token,
         {
           method: 'PUT',
-          body: JSON.stringify(payload)
+          headers,
+          body: JSON.stringify({ ...payload, expectedRevision: diagram.revision })
         }
       )
 
       const updatedRels = relationsRaw.map((r) => (r.id === saved.id ? saved : r))
       setRelationsRaw(updatedRels)
+      if (diagram.revision != null) {
+        setDiagram((prev) => (prev ? { ...prev, revision: (prev.revision ?? 0) + 1 } : prev))
+      }
       saveLocalDiagramSnapshot(diagram.id, diagram, elementsRaw, updatedRels)
       setEditingRelation(null)
       setSavingStatus('Guardado')
     } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 409) {
+        const full = await request<DiagramFullView>(
+          `/api/projects/${project.id}/diagrams/${diagram.id}`,
+          auth.token
+        ).catch(() => null)
+        if (full) {
+          setDiagram(full.diagram)
+          setElementsRaw(full.elements)
+          setRelationsRaw(full.relations)
+          saveServerDiagramSnapshot(diagram.id, full)
+        }
+        setEditingRelation(null)
+        setSavingStatus('Conflicto de concurrencia: el diagrama cambió en el servidor (HTTP 409).')
+        return
+      }
       setRelationsRaw(nextRels)
       saveLocalDiagramSnapshot(diagram.id, diagram, elementsRaw, nextRels)
-      const count = appendOfflineQueue(diagram.id, {
-        type: 'UPDATE_RELATION',
-        payload
-      })
+      const count = appendOfflineQueue(
+        diagram.id,
+        {
+          type: 'UPDATE_RELATION',
+          payload
+        },
+        diagram.revision
+      )
       setPendingQueueCount(count)
       setEditingRelation(null)
       setSavingStatus(pendingOperationStatus(err))
@@ -1489,10 +1737,14 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
     if (!navigator.onLine || getOfflineQueue(diagram.id).length > 0) {
       setRelationsRaw(nextRels)
       saveLocalDiagramSnapshot(diagram.id, diagram, elementsRaw, nextRels)
-      const count = appendOfflineQueue(diagram.id, {
-        type: 'DELETE_RELATION',
-        payload: { relationId: editingRelation.id }
-      })
+      const count = appendOfflineQueue(
+        diagram.id,
+        {
+          type: 'DELETE_RELATION',
+          payload: { relationId: editingRelation.id }
+        },
+        diagram.revision
+      )
       setPendingQueueCount(count)
       setEditingRelation(null)
       setSavingStatus('Guardado localmente (Offline)')
@@ -1501,27 +1753,52 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
 
     try {
       setSavingStatus('Eliminando relación...')
+      const headers: Record<string, string> =
+        diagram.revision != null ? { 'X-Diagram-Revision': String(diagram.revision) } : {}
       await request(
         `/api/projects/${project.id}/diagrams/${diagram.id}/relations/${editingRelation.id}`,
         auth.token,
         {
-          method: 'DELETE'
+          method: 'DELETE',
+          headers
         }
       )
       setRelationsRaw(nextRels)
+      if (diagram.revision != null) {
+        setDiagram((prev) => (prev ? { ...prev, revision: (prev.revision ?? 0) + 1 } : prev))
+      }
       saveLocalDiagramSnapshot(diagram.id, diagram, elementsRaw, nextRels)
       setEditingRelation(null)
       setSavingStatus('Guardado')
     } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 409) {
+        const full = await request<DiagramFullView>(
+          `/api/projects/${project.id}/diagrams/${diagram.id}`,
+          auth.token
+        ).catch(() => null)
+        if (full) {
+          setDiagram(full.diagram)
+          setElementsRaw(full.elements)
+          setRelationsRaw(full.relations)
+          saveServerDiagramSnapshot(diagram.id, full)
+        }
+        setEditingRelation(null)
+        setSavingStatus('Conflicto de concurrencia: el diagrama cambió en el servidor (HTTP 409).')
+        return
+      }
       setRelationsRaw(nextRels)
       saveLocalDiagramSnapshot(diagram.id, diagram, elementsRaw, nextRels)
-      const count = appendOfflineQueue(diagram.id, {
-        type: 'DELETE_RELATION',
-        payload: { relationId: editingRelation.id }
-      })
+      const count = appendOfflineQueue(
+        diagram.id,
+        {
+          type: 'DELETE_RELATION',
+          payload: { relationId: editingRelation.id }
+        },
+        diagram.revision
+      )
       setPendingQueueCount(count)
       setEditingRelation(null)
-      setSavingStatus('Guardado localmente (Offline)')
+      setSavingStatus(pendingOperationStatus(err))
     }
   }
 
@@ -1583,6 +1860,7 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
     <WorkspaceChrome
       projectName={project.name} role={project.role} diagram={diagram} elements={elementsRaw} relations={relationsRaw}
       selectedElement={selectedElement} selectedRelation={selectedRelation} members={members} savingStatus={savingStatus}
+      currentUser={{ name: auth.name, email: auth.email, role: project.role }}
       online={isOnline} syncing={isSyncingQueue} wsConnected={wsConnected} queueCount={pendingQueueCount} readOnly={isReadOnly}
       onBack={onBack} onManageMembers={onManageMembers} onCreate={handleAddElement} onEditElement={handleEditElement}
       onImageUpload={openImageImport}
@@ -1924,6 +2202,7 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
           projectId={project.id}
           diagramId={diagram.id}
           token={auth.token}
+          revision={diagram.revision}
           isReadOnly={isReadOnly}
           onClose={() => setRelationalSchema(null)}
           onDiagramUpdated={handleFullDiagramUpdated}
@@ -1949,6 +2228,7 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
           projectId={project.id}
           diagramId={diagram.id}
           token={auth.token}
+          revision={diagram.revision}
           initialMode={imageImportFile ? 'image' : aiInitialMode}
           initialImageFile={imageImportFile}
           hasExistingContent={elementsRaw.length > 0 || relationsRaw.length > 0}
@@ -1966,6 +2246,7 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
           projectId={project.id}
           diagramId={diagram.id}
           token={auth.token}
+          revision={diagram.revision}
           isReadOnly={isReadOnly}
           onClose={() => setShowVersions(false)}
           onRestored={handleFullDiagramUpdated}
@@ -1980,6 +2261,7 @@ export function UmlCanvas({ project, auth, onError, members = [], onManageMember
           diagramId={diagram.id}
           diagramName={diagram.nombre}
           token={auth.token}
+          revision={diagram.revision}
           isReadOnly={isReadOnly}
           isLocked={diagram.bloqueado}
           lockUser={diagram.bloqueadoPor}

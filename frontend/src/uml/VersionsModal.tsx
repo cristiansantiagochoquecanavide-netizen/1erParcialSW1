@@ -15,6 +15,7 @@ type Props = {
   projectId: string
   diagramId: string
   token: string
+  revision?: number
   isReadOnly: boolean
   onClose: () => void
   onRestored: (fullView: DiagramFullView) => void
@@ -25,6 +26,7 @@ export function VersionsModal({
   projectId,
   diagramId,
   token,
+  revision,
   isReadOnly,
   onClose,
   onRestored,
@@ -93,7 +95,10 @@ export function VersionsModal({
         `/api/projects/${projectId}/diagrams/${diagramId}/versions/${version.id}/restore`,
         {
           method: 'POST',
-          headers: { Authorization: `Bearer ${token}` }
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'X-Diagram-Revision': String(revision ?? 1)
+          }
         }
       )
       if (!res.ok) {

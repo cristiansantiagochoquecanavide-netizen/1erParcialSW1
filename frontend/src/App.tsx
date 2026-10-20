@@ -50,7 +50,7 @@ export default function App() {
   }, [])
   const load = () => auth && api<Project[]>('/api/projects', auth.token).then(setProjects).catch(error)
   useEffect(() => { load() }, [auth]) // eslint-disable-line react-hooks/exhaustive-deps
-  if (!auth) return <AuthScreen registering={registering} setRegistering={setRegistering} onAuth={value => { localStorage.setItem('case.auth', JSON.stringify(value)); setAuth(value) }} onError={error} message={message} />
+  if (!auth) return <AuthScreen registering={registering} setRegistering={v => { setRegistering(v); setMessage(null) }} onAuth={value => { localStorage.setItem('case.auth', JSON.stringify(value)); setAuth(value); setMessage(null) }} onError={error} onClearError={() => setMessage(null)} message={message} />
   if (selected) return <Workspace project={selected} auth={auth} onBack={() => { setSelected(null); load() }} onError={error} />
   const token = auth.token
   async function create(event: FormEvent<HTMLFormElement>) {
@@ -71,24 +71,25 @@ export default function App() {
   }
   async function rename(p: Project) { const name = prompt('Nombre del proyecto:', p.name); if (!name) return; try { await api(`/api/projects/${p.id}`, token, { method: 'PUT', body: JSON.stringify({ name, description: p.description }) }); load() } catch (e) { error(e) } }
   async function remove(p: Project) { if (!confirm(`¿Eliminar “${p.name}”?`)) return; try { await api(`/api/projects/${p.id}`, token, { method: 'DELETE' }); load() } catch (e) { error(e) } }
-  return <main className="app"><header><div><h1>Proyecto CASE</h1><p>{auth.name} · {auth.email}</p></div><button className="secondary" onClick={() => { localStorage.removeItem('case.auth'); setAuth(null) }}>Salir</button></header>{message && <p className="error">{message}</p>}
+  return <main className="app"><header><div><h1>Proyecto CASE</h1><p>{auth.name} · {auth.email}</p></div><button className="secondary" onClick={() => { localStorage.removeItem('case.auth'); setAuth(null); setMessage(null) }}>Salir</button></header>{message && <p className="error">{message}</p>}
     <section className="card"><h2>Nuevo proyecto de modelado</h2><form className="inline" onSubmit={create}><input name="name" placeholder="Nombre" required maxLength={120} /><input name="description" placeholder="Descripción opcional" maxLength={500} /><button>Crear</button></form></section>
     <section className="card"><h2>Mis proyectos</h2>{projects.length === 0 ? <p>Aún no participas en ningún proyecto.</p> : <div className="projects">{projects.map(p => <article key={p.id}><div><strong>{p.name}</strong><span className="role">{p.role}</span><p>{p.description || 'Sin descripción'}</p></div><div className="actions"><button onClick={() => setSelected(p)}>Abrir</button>{p.role !== 'LECTOR' && <button className="secondary" onClick={() => rename(p)}>Editar</button>}{p.role === 'PROPIETARIO' && <button className="danger" onClick={() => remove(p)}>Eliminar</button>}</div></article>)}</div>}</section></main>
 }
 
-function AuthScreen({ registering, setRegistering, onAuth, onError, message }: { registering: boolean; setRegistering: (v: boolean) => void; onAuth: (v: Auth) => void; onError: (e: unknown) => void; message: string | null }) {
+function AuthScreen({ registering, setRegistering, onAuth, onError, onClearError, message }: { registering: boolean; setRegistering: (v: boolean) => void; onAuth: (v: Auth) => void; onError: (e: unknown) => void; onClearError: () => void; message: string | null }) {
   const [submitting, setSubmitting] = useState(false)
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const f = new FormData(event.currentTarget)
     setSubmitting(true)
+    onClearError()
     try {
       const value = await api<Auth>(registering ? '/api/auth/register' : '/api/auth/login', undefined, { method: 'POST', body: JSON.stringify({ email: f.get('email'), password: f.get('password'), ...(registering ? { name: f.get('name') } : {}) }) })
       localStorage.setItem('case.auth', JSON.stringify(value))
       onAuth(value)
     } catch (e) { onError(e) } finally { setSubmitting(false) }
   }
-  return <main className="auth"><section className="card"><h1>Proyecto CASE</h1><p>{registering ? 'Crea tu cuenta para iniciar un espacio de modelado.' : 'Ingresa a tus proyectos de modelado.'}</p>{message && <p className="error">{message}</p>}<form onSubmit={submit}>{registering && <input name="name" placeholder="Nombre" required maxLength={100} />}<input name="email" type="email" placeholder="Correo" autoComplete="email" required /><input name="password" type="password" placeholder="Contraseña (mínimo 8 caracteres)" autoComplete={registering ? 'new-password' : 'current-password'} required minLength={8} /><button disabled={submitting}>{submitting ? 'Procesando…' : registering ? 'Registrarme' : 'Iniciar sesión'}</button></form><button type="button" className="link" onClick={() => setRegistering(!registering)} disabled={submitting}>{registering ? 'Ya tengo una cuenta' : 'Crear una cuenta'}</button></section></main>
+  return <main className="auth"><section className="card"><h1>Proyecto CASE</h1><p>{registering ? 'Crea tu cuenta para iniciar un espacio de modelado.' : 'Ingresa a tus proyectos de modelado.'}</p>{message && <p className="error">{message}</p>}<form onSubmit={submit}>{registering && <input name="name" placeholder="Nombre" required maxLength={100} />}<input name="email" type="email" placeholder="Correo" autoComplete="email" required /><input name="password" type="password" placeholder="Contraseña (mínimo 8 caracteres)" autoComplete={registering ? 'new-password' : 'current-password'} required minLength={8} /><button disabled={submitting}>{submitting ? 'Procesando…' : registering ? 'Registrarme' : 'Iniciar sesión'}</button></form><button type="button" className="link" onClick={() => { setRegistering(!registering); onClearError() }} disabled={submitting}>{registering ? 'Ya tengo una cuenta' : 'Crear una cuenta'}</button></section></main>
 }
 
 function Workspace({ project, auth, onBack, onError }: { project: Project; auth: Auth; onBack: () => void; onError: (e: unknown) => void }) {

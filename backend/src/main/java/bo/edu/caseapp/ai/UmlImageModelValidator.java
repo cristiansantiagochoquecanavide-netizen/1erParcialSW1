@@ -10,7 +10,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.*;
 import java.util.regex.Pattern;
 
-/** Strictly validates Gemini's JSON and removes only low-confidence details before persistence. */
+/** Strictly validates the LLM's JSON (GroqCloud / Qwen) and removes only low-confidence details before persistence. */
 public final class UmlImageModelValidator {
   private static final ObjectMapper JSON = new ObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
   private static final Pattern UML_NAME = Pattern.compile("[\\p{L}_][\\p{L}\\p{N}_]{0,119}");
@@ -24,10 +24,10 @@ public final class UmlImageModelValidator {
   public static ImageModel parseAndValidate(String response) {
     try {
       if (response == null || response.isBlank()) {
-        throw invalid("Gemini devolvió una respuesta vacía.");
+        throw invalid("El proveedor de IA devolvió una respuesta vacía.");
       }
       JsonNode root = JSON.readTree(response.trim());
-      requireObject(root, "La respuesta de Gemini debe ser un objeto JSON.");
+      requireObject(root, "La respuesta de la IA debe ser un objeto JSON.");
       requireFields(root, Set.of("classes", "relations", "warnings"), "La respuesta debe contener únicamente classes, relations y warnings.");
       if (!root.path("classes").isArray() || !root.path("relations").isArray() || !root.path("warnings").isArray()) {
         throw invalid("classes, relations y warnings deben ser arreglos JSON.");
@@ -71,7 +71,7 @@ public final class UmlImageModelValidator {
         byName.put(key, umlClass);
         classes.add(umlClass);
       }
-      if (classes.isEmpty()) throw invalid("Gemini no identificó clases con suficiente confianza. No se modificó el diagrama.");
+      if (classes.isEmpty()) throw invalid("La IA no identificó clases con suficiente confianza. No se modificó el diagrama.");
 
       List<ImageRelation> relations = new ArrayList<>();
       Set<String> uniqueRelations = new HashSet<>();
@@ -112,7 +112,7 @@ public final class UmlImageModelValidator {
     } catch (BadRequestException exception) {
       throw exception;
     } catch (Exception exception) {
-      throw invalid("Gemini no devolvió JSON UML válido. No se modificó el diagrama.");
+      throw invalid("La IA no devolvió JSON UML válido. No se modificó el diagrama.");
     }
   }
 

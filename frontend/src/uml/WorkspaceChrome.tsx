@@ -10,8 +10,11 @@ import {
   ChevronLeftIcon,
   LayersIcon,
   CodeIcon,
-  SparklesIcon
+  SparklesIcon,
+  ChatIcon
 } from './icons'
+import { TeamCollaborationPanel } from './TeamCollaborationPanel'
+import './team-collaboration.css'
 
 const tools: { label: string; icon: string; type?: TipoElementoUML; relation?: TipoRelacionUML }[] = [
   { label: 'Selección', icon: '↖' },
@@ -29,6 +32,7 @@ const tools: { label: string; icon: string; type?: TipoElementoUML; relation?: T
 type Props = {
   projectName: string; role: string; diagram: DiagramSummary | null; elements: ElementDetail[]; relations: RelationDetail[]
   selectedElement: ElementDetail | null; selectedRelation: RelationDetail | null; members: { id: string; name: string; role: string }[]
+  currentUser?: { name: string; email: string; role: string }
   savingStatus: string; online: boolean; syncing: boolean; wsConnected: boolean; queueCount: number; readOnly: boolean
   onBack?: () => void; onManageMembers?: () => void; onCreate: (type: TipoElementoUML) => void
   onImageUpload: (file: File) => void
@@ -47,9 +51,14 @@ export function WorkspaceChrome(p: Props) {
 
   // Estado para paneles redimensionables (Lienzo dinámico)
   const [sidebarWidth, setSidebarWidth] = useState(210)
-  const [inspectorWidth, setInspectorWidth] = useState(270)
+  const [inspectorWidth, setInspectorWidth] = useState(300)
   const [isResizingLeft, setIsResizingLeft] = useState(false)
   const [isResizingRight, setIsResizingRight] = useState(false)
+
+  // Modo del panel lateral derecho (Inspector vs. Espacio de Equipo)
+  const [rightPanelMode, setRightPanelMode] = useState<'inspector' | 'team'>('inspector')
+  const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false)
+  const [isWideTeam, setIsWideTeam] = useState(false)
 
   const typeLabel = (type: TipoElementoUML) => ({ CLASE: 'Clase', INTERFAZ: 'Interfaz', CLASE_ABSTRACTA: 'Clase abstracta', ENUMERACION: 'Enumeración' })[type]
 
@@ -114,6 +123,21 @@ export function WorkspaceChrome(p: Props) {
           <UsersIcon size={14} style={{ marginRight: 5, verticalAlign: 'middle' }} />
           Colaboradores {p.members.length}
         </button>
+        <button
+          className={`chrome-button ${rightPanelMode === 'team' && !isRightPanelCollapsed ? 'team-active-btn' : ''}`}
+          onClick={() => {
+            if (rightPanelMode === 'team' && !isRightPanelCollapsed) {
+              setIsRightPanelCollapsed(true)
+            } else {
+              setRightPanelMode('team')
+              setIsRightPanelCollapsed(false)
+            }
+          }}
+          title={rightPanelMode === 'team' && !isRightPanelCollapsed ? 'Colapsar espacio de equipo' : 'Abrir espacio colaborativo del equipo (Canales, Chat y Agente IA)'}
+        >
+          <ChatIcon size={14} style={{ marginRight: 5, verticalAlign: 'middle' }} />
+          Espacio de Equipo
+        </button>
         <details className="project-actions">
           <summary title="Acciones del proyecto">•••</summary>
           <div className="project-menu">
@@ -173,129 +197,204 @@ export function WorkspaceChrome(p: Props) {
       </div>
     )}
 
-    <div
-      className="workspace-grid"
-      style={{ gridTemplateColumns: `${sidebarWidth}px 5px minmax(300px, 1fr) 5px ${inspectorWidth}px` }}
-    >
-      <aside className="tool-sidebar">
-        <div className="panel-heading">
-          <span className="eyebrow">MODELADO MANUAL</span>
-          <strong>Herramientas</strong>
-        </div>
-        <button className={`tool-item ${activeTool === 'Selección' ? 'selected' : ''}`} title="Seleccionar y mover elementos" onClick={() => setActiveTool('Selección')}>
-          <span>↖</span>Selección
-        </button>
-        <div className="tool-group-label">ELEMENTOS</div>
-        {tools.slice(1, 5).map(t => (
-          <button key={t.label} className={`tool-item ${activeTool === t.label ? 'selected' : ''}`} disabled={isEditingDisabled} title={`${t.label} · crear en el lienzo`} onClick={() => { setActiveTool(t.label); if (t.type) p.onCreate(t.type) }}>
-            <span>{t.icon}</span>{t.label}
-          </button>
-        ))}
-        <div className="tool-group-label">RELACIONES <small>arrastra entre nodos</small></div>
-        <button className={`tool-item relation-create ${activeTool === 'Crear relación' ? 'selected' : ''}`} disabled={isEditingDisabled} title="Conecta dos elementos desde sus puntos de conexión" onClick={() => setActiveTool('Crear relación')}>
-          <span>⌁</span>Crear relación
-        </button>
-        {tools.slice(5).map(t => (
-          <button key={t.label} className={`tool-item relation-sub ${relationType === t.relation ? 'selected' : ''}`} disabled={isEditingDisabled} title={`Usar tipo ${t.label}; arrastra desde un nodo a otro`} onClick={() => { setRelationType(t.relation!); p.onRelationType(t.relation!); setActiveTool('Crear relación') }}>
-            <span>{t.icon}</span>{t.label}
-          </button>
-        ))}
-        <p className="sidebar-hint">{activeTool === 'Crear relación' ? 'Arrastra desde un punto de conexión hasta otro elemento.' : 'Selecciona una herramienta para continuar.'}</p>
-      </aside>
+    {/* Ancho efectivo del panel lateral derecho considerando modo de equipo y colapso */}
+    {(() => {
+      const effectiveRightWidth = isRightPanelCollapsed
+        ? 0
+        : rightPanelMode === 'team'
+        ? (isWideTeam ? 480 : Math.max(340, inspectorWidth))
+        : inspectorWidth
 
-      {/* Handles de arrastre para redimensionar paneles */}
-      <div className={`panel-resizer ${isResizingLeft ? 'dragging' : ''}`} onMouseDown={() => setIsResizingLeft(true)} title="Arrastrar para ajustar ancho del panel de herramientas" />
-
-      <main className="canvas-column">
-        <div className="canvas-heading">
-          <div>
-            <span className="eyebrow">LIENZO UML</span>
-            <span>{p.elements.length} elementos · {p.relations.length} relaciones</span>
-          </div>
-          <div className="canvas-heading-actions">
-            {p.selectedCount > 0 ? (
-              <>
-                <span className="selection-chip">{p.selectedCount} seleccionados</span>
-                {!isEditingDisabled && <button className="quiet-button danger-text" onClick={p.onDeleteSelected}>Eliminar</button>}
-                <button className="quiet-button" onClick={p.onDeselectAll}>Limpiar selección</button>
-              </>
-            ) : (
-              <button className="quiet-button" onClick={p.onSelectAll}>Seleccionar todo</button>
-            )}
-            <details className="more-tools">
-              <summary>Más herramientas</summary>
-              <div className="project-menu">
-                <button onClick={p.onValidate}>Validar modelo</button>
-                <button onClick={p.onRelational}>Relacional y SQL</button>
-                <button onClick={() => p.onAi('command')}>Asistente de modelado</button>
-                <button onClick={p.onGenerator}>Generar software</button>
-                <button onClick={p.onVersions}>Versiones</button>
-                <button onClick={p.onExchange}>Enterprise Architect / XMI</button>
-                <button onClick={p.onApiTester}>Probar API</button>
-              </div>
-            </details>
-          </div>
-        </div>
-        <div className="canvas-frame" data-active-tool={activeTool} data-relation-type={relationType}>
-          <div className="canvas-hint">
-            {activeTool === 'Crear relación' ? `RELACIÓN · ${relationType.toLowerCase()} · conecta dos elementos` : 'SELECCIÓN · arrastra para mover · rueda para zoom'}
-          </div>
-          <div className="canvas-mount">{p.children}</div>
-        </div>
-      </main>
-
-      <div className={`panel-resizer ${isResizingRight ? 'dragging' : ''}`} onMouseDown={() => setIsResizingRight(true)} title="Arrastrar para ajustar ancho del inspector" />
-
-      <aside className="properties-panel">
-        <div className="panel-heading">
-          <span className="eyebrow">INSPECTOR</span>
-          <strong>{p.selectedElement || p.selectedRelation ? 'Propiedades' : 'Diagrama'}</strong>
-        </div>
-        {p.selectedElement ? (
-          <>
-            <div className="property-type">{typeLabel(p.selectedElement.tipoElemento)}</div>
-            <h3 className="property-name">{p.selectedElement.nombre}</h3>
-            <PropertyRows title="ATRIBUTOS" rows={parseUmlProperties(p.selectedElement.propiedadesJson).attributes.map(a => `${a.visibility} ${a.name}: ${a.type}`)} empty="Sin atributos"/>
-            <PropertyRows title="MÉTODOS" rows={parseUmlProperties(p.selectedElement.propiedadesJson).methods.map(m => `${m.visibility} ${m.name}(${m.parameters}): ${m.returnType}`)} empty="Sin métodos"/>
-            <button className="chrome-button full-button" disabled={isEditingDisabled} onClick={() => p.onEditElement(p.selectedElement!.id)}>Editar elemento</button>
-          </>
-        ) : p.selectedRelation ? (
-          <>
-            <div className="property-type">{p.selectedRelation.tipoRelacion}</div>
-            <h3 className="property-name">{p.selectedRelation.nombreRelacion || 'Relación UML'}</h3>
-            <PropertyRows title="ORIGEN" rows={[p.elements.find(e => e.id === p.selectedRelation!.elementoOrigen)?.nombre ?? 'Elemento']} empty="—"/>
-            <PropertyRows title="DESTINO" rows={[p.elements.find(e => e.id === p.selectedRelation!.elementoDestino)?.nombre ?? 'Elemento']} empty="—"/>
-            <PropertyRows title="MULTIPLICIDAD · ORIGEN" rows={[p.selectedRelation.multiplicidadOrigen || 'No definida']} empty="—"/>
-            <PropertyRows title="MULTIPLICIDAD · DESTINO" rows={[p.selectedRelation.multiplicidadDestino || 'No definida']} empty="—"/>
-            <button className="chrome-button full-button" disabled={isEditingDisabled} onClick={() => p.onEditRelation(p.selectedRelation!)}>Editar relación</button>
-          </>
-        ) : (
-          <>
-            <p className="inspector-copy">Resumen y estado del diagrama activo.</p>
-            <PropertyRows title="ESTADO" rows={[p.diagram?.estado ?? 'Cargando…']} empty="—"/>
-            <PropertyRows title="BLOQUEO" rows={[isLocked ? `Bloqueado por ${lockUser}` : '● Disponible']} empty="—"/>
-            <PropertyRows title="ELEMENTOS" rows={[String(p.elements.length)]} empty="0"/>
-            <PropertyRows title="RELACIONES" rows={[String(p.relations.length)]} empty="0"/>
-            <PropertyRows title="ÚLTIMO GUARDADO" rows={[p.savingStatus]} empty="—"/>
-            <div className="selection-note">Selecciona una clase o relación para ver sus propiedades.</div>
-          </>
-        )}
-        <section className="ea-card">
-          <div className="ea-title">
-            <span><ExchangeIcon size={14} /></span>
-            <div>
-              <strong>Enterprise Architect</strong>
-              <small>Importación / Exportación XMI 2.1</small>
+      return (
+        <div
+          className="workspace-grid"
+          style={{
+            gridTemplateColumns: isRightPanelCollapsed
+              ? `${sidebarWidth}px 5px minmax(300px, 1fr)`
+              : `${sidebarWidth}px 5px minmax(300px, 1fr) 5px ${effectiveRightWidth}px`
+          }}
+        >
+          <aside className="tool-sidebar">
+            <div className="panel-heading">
+              <span className="eyebrow">MODELADO MANUAL</span>
+              <strong>Herramientas</strong>
             </div>
-          </div>
-          <button onClick={p.onExchange} disabled={isLocked} title="Importar o exportar modelos XMI compatibles con Sparx Enterprise Architect">
-            <ExchangeIcon size={13} style={{ marginRight: 4, verticalAlign: 'middle' }} />
-            Importar / Exportar EA (XMI)
-          </button>
-          <div className="ea-state">{isLocked ? '🔒 Operación en curso...' : '● Listo para interoperabilidad'}</div>
-        </section>
-      </aside>
-    </div>
+            <button className={`tool-item ${activeTool === 'Selección' ? 'selected' : ''}`} title="Seleccionar y mover elementos" onClick={() => setActiveTool('Selección')}>
+              <span>↖</span>Selección
+            </button>
+            <div className="tool-group-label">ELEMENTOS</div>
+            {tools.slice(1, 5).map(t => (
+              <button key={t.label} className={`tool-item ${activeTool === t.label ? 'selected' : ''}`} disabled={isEditingDisabled} title={`${t.label} · crear en el lienzo`} onClick={() => { setActiveTool(t.label); if (t.type) p.onCreate(t.type) }}>
+                <span>{t.icon}</span>{t.label}
+              </button>
+            ))}
+            <div className="tool-group-label">RELACIONES <small>arrastra entre nodos</small></div>
+            <button className={`tool-item relation-create ${activeTool === 'Crear relación' ? 'selected' : ''}`} disabled={isEditingDisabled} title="Conecta dos elementos desde sus puntos de conexión" onClick={() => setActiveTool('Crear relación')}>
+              <span>⌁</span>Crear relación
+            </button>
+            {tools.slice(5).map(t => (
+              <button key={t.label} className={`tool-item relation-sub ${relationType === t.relation ? 'selected' : ''}`} disabled={isEditingDisabled} title={`Usar tipo ${t.label}; arrastra desde un nodo a otro`} onClick={() => { setRelationType(t.relation!); p.onRelationType(t.relation!); setActiveTool('Crear relación') }}>
+                <span>{t.icon}</span>{t.label}
+              </button>
+            ))}
+            <p className="sidebar-hint">{activeTool === 'Crear relación' ? 'Arrastra desde un punto de conexión hasta otro elemento.' : 'Selecciona una herramienta para continuar.'}</p>
+          </aside>
+
+          {/* Handles de arrastre para redimensionar paneles */}
+          <div className={`panel-resizer ${isResizingLeft ? 'dragging' : ''}`} onMouseDown={() => setIsResizingLeft(true)} title="Arrastrar para ajustar ancho del panel de herramientas" />
+
+          <main className="canvas-column">
+            <div className="canvas-heading">
+              <div>
+                <span className="eyebrow">LIENZO UML</span>
+                <span>{p.elements.length} elementos · {p.relations.length} relaciones</span>
+              </div>
+              <div className="canvas-heading-actions">
+                {p.selectedCount > 0 ? (
+                  <>
+                    <span className="selection-chip">{p.selectedCount} seleccionados</span>
+                    {!isEditingDisabled && <button className="quiet-button danger-text" onClick={p.onDeleteSelected}>Eliminar</button>}
+                    <button className="quiet-button" onClick={p.onDeselectAll}>Limpiar selección</button>
+                  </>
+                ) : (
+                  <button className="quiet-button" onClick={p.onSelectAll}>Seleccionar todo</button>
+                )}
+                {isRightPanelCollapsed && (
+                  <button
+                    className="quiet-button open-panel-btn"
+                    onClick={() => setIsRightPanelCollapsed(false)}
+                    title="Abrir panel lateral derecho"
+                  >
+                    ◀ Abrir {rightPanelMode === 'team' ? 'Espacio de Equipo' : 'Inspector'}
+                  </button>
+                )}
+                <details className="more-tools">
+                  <summary>Más herramientas</summary>
+                  <div className="project-menu">
+                    <button onClick={p.onValidate}>Validar modelo</button>
+                    <button onClick={p.onRelational}>Relacional y SQL</button>
+                    <button onClick={() => p.onAi('command')}>Asistente de modelado</button>
+                    <button onClick={p.onGenerator}>Generar software</button>
+                    <button onClick={p.onVersions}>Versiones</button>
+                    <button onClick={p.onExchange}>Enterprise Architect / XMI</button>
+                    <button onClick={p.onApiTester}>Probar API</button>
+                  </div>
+                </details>
+              </div>
+            </div>
+            <div className="canvas-frame" data-active-tool={activeTool} data-relation-type={relationType}>
+              <div className="canvas-hint">
+                {activeTool === 'Crear relación' ? `RELACIÓN · ${relationType.toLowerCase()} · conecta dos elementos` : 'SELECCIÓN · arrastra para mover · rueda para zoom'}
+              </div>
+              <div className="canvas-mount">{p.children}</div>
+            </div>
+          </main>
+
+          {!isRightPanelCollapsed && (
+            <>
+              <div
+                className={`panel-resizer ${isResizingRight ? 'dragging' : ''}`}
+                onMouseDown={() => setIsResizingRight(true)}
+                title="Arrastrar para ajustar ancho del panel derecho"
+              />
+
+              <div className="right-panel-container" style={{ width: effectiveRightWidth }}>
+                <div className="right-panel-tabbar">
+                  <button
+                    type="button"
+                    className={`right-tab-btn ${rightPanelMode === 'inspector' ? 'active' : ''}`}
+                    onClick={() => setRightPanelMode('inspector')}
+                    title="Ver propiedades del elemento o diagrama"
+                  >
+                    Inspector
+                  </button>
+                  <button
+                    type="button"
+                    className={`right-tab-btn ${rightPanelMode === 'team' ? 'active' : ''}`}
+                    onClick={() => setRightPanelMode('team')}
+                    title="Abrir espacio colaborativo con canales y Agente IA"
+                  >
+                    <ChatIcon size={12} style={{ marginRight: 4, verticalAlign: 'middle' }} />
+                    Espacio de Equipo
+                  </button>
+                  <button
+                    type="button"
+                    className="right-tab-collapse"
+                    onClick={() => setIsRightPanelCollapsed(true)}
+                    title="Colapsar panel derecho (maximizar área de modelado)"
+                  >
+                    ⇥
+                  </button>
+                </div>
+
+                {rightPanelMode === 'team' ? (
+                  <TeamCollaborationPanel
+                    projectName={p.projectName}
+                    diagramName={p.diagram?.nombre ?? 'Diagrama UML'}
+                    members={p.members.map(m => ({ ...m, email: (m as any).email ?? `${m.name.toLowerCase().replace(/\s+/g, '')}@caseapp.edu.bo` }))}
+                    currentUser={p.currentUser ?? { name: 'Usuario', email: 'usuario@caseapp.edu.bo', role: p.role }}
+                    isWide={isWideTeam}
+                    onToggleWide={() => setIsWideTeam(!isWideTeam)}
+                    onClose={() => setIsRightPanelCollapsed(true)}
+                    onSwitchToInspector={() => setRightPanelMode('inspector')}
+                  />
+                ) : (
+                  <aside className="properties-panel">
+                    <div className="panel-heading">
+                      <span className="eyebrow">INSPECTOR</span>
+                      <strong>{p.selectedElement || p.selectedRelation ? 'Propiedades' : 'Diagrama'}</strong>
+                    </div>
+                    {p.selectedElement ? (
+                      <>
+                        <div className="property-type">{typeLabel(p.selectedElement.tipoElemento)}</div>
+                        <h3 className="property-name">{p.selectedElement.nombre}</h3>
+                        <PropertyRows title="ATRIBUTOS" rows={parseUmlProperties(p.selectedElement.propiedadesJson).attributes.map(a => `${a.visibility} ${a.name}: ${a.type}`)} empty="Sin atributos"/>
+                        <PropertyRows title="MÉTODOS" rows={parseUmlProperties(p.selectedElement.propiedadesJson).methods.map(m => `${m.visibility} ${m.name}(${m.parameters}): ${m.returnType}`)} empty="Sin métodos"/>
+                        <button className="chrome-button full-button" disabled={isEditingDisabled} onClick={() => p.onEditElement(p.selectedElement!.id)}>Editar elemento</button>
+                      </>
+                    ) : p.selectedRelation ? (
+                      <>
+                        <div className="property-type">{p.selectedRelation.tipoRelacion}</div>
+                        <h3 className="property-name">{p.selectedRelation.nombreRelacion || 'Relación UML'}</h3>
+                        <PropertyRows title="ORIGEN" rows={[p.elements.find(e => e.id === p.selectedRelation!.elementoOrigen)?.nombre ?? 'Elemento']} empty="—"/>
+                        <PropertyRows title="DESTINO" rows={[p.elements.find(e => e.id === p.selectedRelation!.elementoDestino)?.nombre ?? 'Elemento']} empty="—"/>
+                        <PropertyRows title="MULTIPLICIDAD · ORIGEN" rows={[p.selectedRelation.multiplicidadOrigen || 'No definida']} empty="—"/>
+                        <PropertyRows title="MULTIPLICIDAD · DESTINO" rows={[p.selectedRelation.multiplicidadDestino || 'No definida']} empty="—"/>
+                        <button className="chrome-button full-button" disabled={isEditingDisabled} onClick={() => p.onEditRelation(p.selectedRelation!)}>Editar relación</button>
+                      </>
+                    ) : (
+                      <>
+                        <p className="inspector-copy">Resumen y estado del diagrama activo.</p>
+                        <PropertyRows title="ESTADO" rows={[p.diagram?.estado ?? 'Cargando…']} empty="—"/>
+                        <PropertyRows title="BLOQUEO" rows={[isLocked ? `Bloqueado por ${lockUser}` : '● Disponible']} empty="—"/>
+                        <PropertyRows title="ELEMENTOS" rows={[String(p.elements.length)]} empty="0"/>
+                        <PropertyRows title="RELACIONES" rows={[String(p.relations.length)]} empty="0"/>
+                        <PropertyRows title="ÚLTIMO GUARDADO" rows={[p.savingStatus]} empty="—"/>
+                        <div className="selection-note">Selecciona una clase o relación para ver sus propiedades.</div>
+                      </>
+                    )}
+                    <section className="ea-card">
+                      <div className="ea-title">
+                        <span><ExchangeIcon size={14} /></span>
+                        <div>
+                          <strong>Enterprise Architect</strong>
+                          <small>Importación / Exportación XMI 2.1</small>
+                        </div>
+                      </div>
+                      <button onClick={p.onExchange} disabled={isLocked} title="Importar o exportar modelos XMI compatibles con Sparx Enterprise Architect">
+                        <ExchangeIcon size={13} style={{ marginRight: 4, verticalAlign: 'middle' }} />
+                        Importar / Exportar EA (XMI)
+                      </button>
+                      <div className="ea-state">{isLocked ? '🔒 Operación en curso...' : '● Listo para interoperabilidad'}</div>
+                    </section>
+                  </aside>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )
+    })()}
 
     <footer className="workspace-footer">
       <span className={p.online ? 'footer-good' : 'footer-warn'}>● {p.online ? 'Conexión disponible' : 'Sin conexión'}</span>

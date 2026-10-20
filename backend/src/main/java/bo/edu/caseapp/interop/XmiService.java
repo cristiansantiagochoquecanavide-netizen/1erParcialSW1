@@ -461,10 +461,16 @@ public class XmiService {
   }
 
   public DiagramFullView importXmi(UUID projectId, UUID diagramId, String email, String xmlContent) {
+    return importXmi(projectId, diagramId, email, xmlContent, null);
+  }
+
+  public DiagramFullView importXmi(UUID projectId, UUID diagramId, String email, String xmlContent, Long expectedRevision) {
     umlService.acquireLock(projectId, diagramId, email);
     try {
       projectService.requireCanEdit(projectId, email);
       DiagramaClase diagram = validateDiagram(projectId, diagramId);
+      long newRev = umlService.reserveNextRevision(diagramId, expectedRevision);
+      diagram.setRevision(newRev);
 
       // 1. Limpiar BOM y normalizar encoding del prólogo XML para evitar fallos de parser con windows-1252 de EA
       String cleanContent = xmlContent;
@@ -903,7 +909,7 @@ public class XmiService {
         }
       }
 
-      wsHandler.broadcastDiagramChanged(diagramId, "XMI_IMPORTED");
+      umlService.notifyCollabAfterCommit(diagramId, "XMI_IMPORTED", newRev);
       return umlService.getDiagram(projectId, diagramId, email);
 
     } catch (Exception e) {
@@ -965,8 +971,14 @@ public class XmiService {
   }
 
   public DiagramFullView importJson(UUID projectId, UUID diagramId, String email, String jsonContent) {
+    return importJson(projectId, diagramId, email, jsonContent, null);
+  }
+
+  public DiagramFullView importJson(UUID projectId, UUID diagramId, String email, String jsonContent, Long expectedRevision) {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = validateDiagram(projectId, diagramId);
+    long newRev = umlService.reserveNextRevision(diagramId, expectedRevision);
+    diagram.setRevision(newRev);
 
     try {
       JsonNode root = objectMapper.readTree(jsonContent);
@@ -1015,7 +1027,7 @@ public class XmiService {
         }
       }
 
-      wsHandler.broadcastDiagramChanged(diagramId, "JSON_IMPORTED");
+      umlService.notifyCollabAfterCommit(diagramId, "JSON_IMPORTED", newRev);
       return umlService.getDiagram(projectId, diagramId, email);
 
     } catch (Exception e) {

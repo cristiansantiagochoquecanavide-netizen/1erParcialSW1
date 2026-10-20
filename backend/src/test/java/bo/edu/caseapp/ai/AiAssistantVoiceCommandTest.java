@@ -122,4 +122,19 @@ class AiAssistantVoiceCommandTest {
         service.executeCommand(projectId, diagramId, email, request)
     );
   }
+
+  @Test
+  void executeCommand_withObsoleteRevision_throwsConflictException_beforeModifyingModel() {
+    diagram.setRevision(5L);
+    CommandRequest request = new CommandRequest("Crear clase Producto", "VOICE", null, null);
+
+    bo.edu.caseapp.error.ConflictException ex = assertThrows(
+        bo.edu.caseapp.error.ConflictException.class,
+        () -> service.executeCommand(projectId, diagramId, email, request, 4L)
+    );
+
+    assertTrue(ex.getMessage().contains("Conflicto de concurrencia"));
+    verifyNoInteractions(elementRepo);
+    verifyNoInteractions(relationRepo);
+  }
 }

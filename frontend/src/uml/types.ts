@@ -61,6 +61,7 @@ export type DiagramSummary = {
   bloqueado?: boolean
   bloqueadoPor?: string | null
   fechaBloqueo?: string | null
+  revision?: number
 }
 
 export type ElementDetail = {

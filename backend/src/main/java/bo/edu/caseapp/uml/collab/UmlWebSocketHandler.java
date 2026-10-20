@@ -41,13 +41,23 @@ public class UmlWebSocketHandler extends TextWebSocketHandler {
   }
 
   public void broadcastDiagramChanged(UUID diagramId, String eventType) {
+    broadcastDiagramChanged(diagramId, eventType, null);
+  }
+
+  public void broadcastDiagramChanged(UUID diagramId, String eventType, Long revision) {
     if (diagramId == null) return;
     String dIdStr = diagramId.toString();
     Set<WebSocketSession> sessions = diagramSessions.get(dIdStr);
     if (sessions == null || sessions.isEmpty()) return;
 
-    String payload = String.format("{\"type\":\"%s\",\"diagramId\":\"%s\",\"timestamp\":%d}",
-        eventType != null ? eventType : "DIAGRAM_MUTATED", dIdStr, System.currentTimeMillis());
+    String payload;
+    if (revision != null) {
+      payload = String.format("{\"type\":\"%s\",\"diagramId\":\"%s\",\"revision\":%d,\"timestamp\":%d}",
+          eventType != null ? eventType : "DIAGRAM_MUTATED", dIdStr, revision, System.currentTimeMillis());
+    } else {
+      payload = String.format("{\"type\":\"%s\",\"diagramId\":\"%s\",\"timestamp\":%d}",
+          eventType != null ? eventType : "DIAGRAM_MUTATED", dIdStr, System.currentTimeMillis());
+    }
 
     TextMessage message = new TextMessage(payload);
     for (WebSocketSession s : sessions) {

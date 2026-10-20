@@ -16,8 +16,13 @@ public final class UmlRequests {
 
   public record UpdateDiagram(
       @NotBlank @Size(max = 120) String nombre,
-      @Size(max = 500) String descripcion
-  ) { }
+      @Size(max = 500) String descripcion,
+      Long expectedRevision
+  ) {
+    public UpdateDiagram(String nombre, String descripcion) {
+      this(nombre, descripcion, null);
+    }
+  }
 
   public record SaveElement(
       UUID id,
@@ -25,8 +30,13 @@ public final class UmlRequests {
       @NotBlank @Size(max = 120) String nombre,
       @NotNull Double posicionX,
       @NotNull Double posicionY,
-      String propiedadesJson
-  ) { }
+      String propiedadesJson,
+      Long expectedRevision
+  ) {
+    public SaveElement(UUID id, TipoElementoUML tipoElemento, String nombre, Double posicionX, Double posicionY, String propiedadesJson) {
+      this(id, tipoElemento, nombre, posicionX, posicionY, propiedadesJson, null);
+    }
+  }
 
   public record SaveRelation(
       UUID id,
@@ -35,8 +45,13 @@ public final class UmlRequests {
       @Size(max = 120) String nombreRelacion,
       @NotNull TipoRelacionUML tipoRelacion,
       @Size(max = 20) String multiplicidadOrigen,
-      @Size(max = 20) String multiplicidadDestino
-  ) { }
+      @Size(max = 20) String multiplicidadDestino,
+      Long expectedRevision
+  ) {
+    public SaveRelation(UUID id, UUID elementoOrigen, UUID elementoDestino, String nombreRelacion, TipoRelacionUML tipoRelacion, String multiplicidadOrigen, String multiplicidadDestino) {
+      this(id, elementoOrigen, elementoDestino, nombreRelacion, tipoRelacion, multiplicidadOrigen, multiplicidadDestino, null);
+    }
+  }
 
   public record PositionUpdate(
       @NotNull UUID id,
@@ -45,6 +60,11 @@ public final class UmlRequests {
   ) { }
 
   public record SyncPositions(
-      @NotNull List<PositionUpdate> positions
-  ) { }
+      @NotNull List<PositionUpdate> positions,
+      Long expectedRevision
+  ) {
+    public SyncPositions(List<PositionUpdate> positions) {
+      this(positions, null);
+    }
+  }
 }

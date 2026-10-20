@@ -14,6 +14,9 @@ import bo.edu.caseapp.ai.AiResponses.ChatResponse;
 import bo.edu.caseapp.ai.AiResponses.CommandResponse;
 import bo.edu.caseapp.ai.AiResponses.ImageAnalysisResponse;
 import bo.edu.caseapp.ai.AiResponses.ImageReconstructionResponse;
+import bo.edu.caseapp.ai.provider.LlmMessage;
+import bo.edu.caseapp.ai.provider.LlmProvider;
+import bo.edu.caseapp.ai.provider.LlmResponse;
 import bo.edu.caseapp.error.BadRequestException;
 import bo.edu.caseapp.error.NotFoundException;
 import bo.edu.caseapp.project.ProjectService;
@@ -51,10 +54,10 @@ public class AiAssistantService {
   private final UmlService umlService;
   private final bo.edu.caseapp.uml.relational.SqlDdlParserService sqlDdlParserService;
   private final bo.edu.caseapp.uml.collab.UmlWebSocketHandler wsHandler;
-  private final String geminiApiKey;
-  private final String geminiModel;
+  private final LlmProvider llmProvider;
   private final ObjectMapper objectMapper = new ObjectMapper();
 
+  @org.springframework.beans.factory.annotation.Autowired
   public AiAssistantService(
       DiagramaClaseRepository diagramRepo,
       ElementoUMLRepository elementRepo,
@@ -65,8 +68,7 @@ public class AiAssistantService {
       UmlService umlService,
       bo.edu.caseapp.uml.relational.SqlDdlParserService sqlDdlParserService,
       bo.edu.caseapp.uml.collab.UmlWebSocketHandler wsHandler,
-      @Value("${app.gemini.api-key:}") String geminiApiKey,
-      @Value("${app.gemini.model:gemini-3.8-flash}") String geminiModel
+      LlmProvider llmProvider
   ) {
     this.diagramRepo = diagramRepo;
     this.elementRepo = elementRepo;
@@ -77,26 +79,51 @@ public class AiAssistantService {
     this.umlService = umlService;
     this.sqlDdlParserService = sqlDdlParserService;
     this.wsHandler = wsHandler;
-    this.geminiApiKey = geminiApiKey;
-    this.geminiModel = geminiModel;
+    this.llmProvider = llmProvider;
+  }
+
+  /** Constructor de compatibilidad para pruebas unitarias existentes */
+  public AiAssistantService(
+      DiagramaClaseRepository diagramRepo,
+      ElementoUMLRepository elementRepo,
+      RelacionUMLRepository relationRepo,
+      InteraccionIaRepository iaRepo,
+      ProjectService projectService,
+      UserRepository userRepo,
+      UmlService umlService,
+      bo.edu.caseapp.uml.relational.SqlDdlParserService sqlDdlParserService,
+      bo.edu.caseapp.uml.collab.UmlWebSocketHandler wsHandler,
+      String legacyApiKey,
+      String legacyModel
+  ) {
+    this(diagramRepo, elementRepo, relationRepo, iaRepo, projectService, userRepo, umlService, sqlDdlParserService, wsHandler, (LlmProvider) null);
   }
 
   public CommandResponse executeCommand(UUID projectId, UUID diagramId, String email, CommandRequest request) {
+    return executeCommand(projectId, diagramId, email, request, null);
+  }
+
+  public CommandResponse executeCommand(UUID projectId, UUID diagramId, String email, CommandRequest request, Long expectedRevision) {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = validateDiagram(projectId, diagramId);
     umlService.requireNotLocked(diagram, email);
 
+    if (expectedRevision != null && !expectedRevision.equals(diagram.getRevision())) {
+      throw new bo.edu.caseapp.error.ConflictException("Conflicto de concurrencia: el diagrama ha sido modificado por otro colaborador (revisión esperada: "
+          + expectedRevision + ", revisión actual: " + diagram.getRevision() + "). Actualiza el diagrama para sincronizar.");
+    }
+
     User user = userRepo.findByEmailIgnoreCase(email)
         .orElseThrow(() -> new NotFoundException("Usuario no encontrado."));
 
-    if (!"GEMINI_CANONICAL".equals(request.resolvedSource()) && !looksLikeSqlDdl(request.command())) {
-      List<String> interpretedCommands = interpretCommandWithGemini(diagramId, email, request.command());
+    if (!"LLM_CANONICAL".equals(request.resolvedSource()) && !looksLikeSqlDdl(request.command())) {
+      List<String> interpretedCommands = interpretCommandWithGroq(diagramId, email, request.command());
       if (interpretedCommands != null && !interpretedCommands.isEmpty()) {
         CommandResponse lastResponse = null;
         for (String interpretedCommand : interpretedCommands) {
           lastResponse = executeCommand(projectId, diagramId, email,
-              new CommandRequest(interpretedCommand, "GEMINI_CANONICAL",
-                  request.selectedElementId(), request.selectedRelationId()));
+              new CommandRequest(interpretedCommand, "LLM_CANONICAL",
+                  request.selectedElementId(), request.selectedRelationId()), expectedRevision);
         }
         return lastResponse;
       }
@@ -459,6 +486,9 @@ public class AiAssistantService {
         }
       }
 
+    } catch (bo.edu.caseapp.error.ConflictException | bo.edu.caseapp.error.ForbiddenException
+        | bo.edu.caseapp.error.NotFoundException | bo.edu.caseapp.error.BadRequestException e) {
+      throw e;
     } catch (Exception e) {
       message = "Error al procesar el comando: " + e.getMessage();
     }
@@ -467,7 +497,7 @@ public class AiAssistantService {
       iaRepo.save(new InteraccionIa(diagram, user, "COMANDO_" + request.resolvedSource(), raw, message, actionType));
     } catch (Exception ignored) {}
 
-    wsHandler.broadcastDiagramChanged(diagramId, "COMMAND_EXECUTED");
+    wsHandler.broadcastDiagramChanged(diagramId, "COMMAND_EXECUTED", diagram.getRevision());
     DiagramFullView updated = umlService.getDiagram(projectId, diagramId, email);
     return new CommandResponse(success, actionType, message, updated);
   }
@@ -477,27 +507,60 @@ public class AiAssistantService {
     projectService.requireAccess(projectId, email);
     validateDiagram(projectId, diagramId);
 
-    String q = request.question().toLowerCase().trim();
+    String q = request.question().trim();
+    if (llmProvider != null && llmProvider.isConfigured()) {
+      try {
+        String context = buildCommandContext(diagramId, email);
+        String systemPrompt = "Eres el asistente y consultor experto en ingeniería de software y modelado UML de la herramienta CASE colaborativa.\n"
+            + "Responde en español de forma concisa, técnica y didáctica. Si el usuario pregunta sobre conceptos UML (asociación, herencia, composición, etc.), explícalos claramente.\n"
+            + "Si pregunta sobre el diseño del diagrama actual, analiza el contexto provisto y sugiere mejoras precisas.\n"
+            + "Termina siempre con una sugerencia de comando accionable que el usuario pueda escribir o dictar en el editor.\n\n"
+            + "CONTEXTO DEL DIAGRAMA ACTUAL:\n" + context;
+
+        LlmResponse resp = llmProvider.chat(List.of(
+            LlmMessage.system(systemPrompt),
+            LlmMessage.user(q)
+        ), 800, 0.3);
+
+        if (resp.success() && resp.content() != null && !resp.content().isBlank()) {
+          String full = resp.content().trim();
+          String answer = full;
+          String suggestion = null;
+          int sugIdx = full.lastIndexOf("Sugerencia:");
+          if (sugIdx < 0) sugIdx = full.lastIndexOf("Pruébalo con:");
+          if (sugIdx < 0) sugIdx = full.lastIndexOf("Prueba:");
+          if (sugIdx >= 0) {
+            answer = full.substring(0, sugIdx).trim();
+            suggestion = full.substring(sugIdx).replaceAll("(?i)^(?:Sugerencia|Pruébalo con|Prueba):?\s*", "").trim();
+          }
+          return new ChatResponse(answer, suggestion);
+        }
+      } catch (Exception ex) {
+        log.warn("Fallo en consulta de chat con Groq, recurriendo a respuestas base: {}", ex.getMessage());
+      }
+    }
+
+    String lower = q.toLowerCase(Locale.ROOT);
     String answer;
     String suggestion = null;
 
-    if (q.contains("herencia") || q.contains("generaliz")) {
+    if (lower.contains("herencia") || lower.contains("generaliz")) {
       answer = "En UML, la **Herencia (Generalización)** representa una relación 'es-un'. La subclase hereda atributos y operaciones de la superclase. Se representa con una línea sólida y una flecha triangular vacía hacia la clase padre.";
       suggestion = "Puedes decir: 'Crear clase Perro con herencia a Animal'.";
-    } else if (q.contains("composicion")) {
+    } else if (lower.contains("composicion")) {
       answer = "La **Composición** es una forma fuerte de agregación donde las partes tienen un ciclo de vida dependiente del todo. Si se destruye el objeto compuesto, se eliminan sus partes. Se representa con un rombo relleno en el extremo del compuesto.";
       suggestion = "Puedes decir: 'Relacionar Factura con ItemFactura composicion 1 a N'.";
-    } else if (q.contains("agregacion")) {
+    } else if (lower.contains("agregacion")) {
       answer = "La **Agregación** representa una relación 'tiene-un' débil. Las partes pueden existir independientemente del objeto contenedor. Se representa con un rombo vacío.";
       suggestion = "Ejemplo: Un Departamento agrega Profesores.";
-    } else if (q.contains("clave foranea") || q.contains("foreign key") || q.contains("fk")) {
+    } else if (lower.contains("clave foranea") || lower.contains("foreign key") || lower.contains("fk")) {
       answer = "En la transformación a modelo relacional (CU06), las relaciones 1:N propagan la clave primaria del lado '1' como clave foránea (FK) en la tabla del lado 'N'. Para relaciones N:M, se genera automáticamente una tabla intermedia con ambas claves foráneas.";
       suggestion = "Usa el botón 'Modelo Relacional' en la barra superior para ver el script SQL DDL.";
-    } else if (q.contains("backend") || q.contains("generar") || q.contains("codigo")) {
+    } else if (lower.contains("backend") || lower.contains("generar") || lower.contains("codigo")) {
       answer = "La plataforma genera un backend Spring Boot 3 con Java 21 estructurado en Controller -> Service -> Repository -> Entity, conectado a PostgreSQL, junto con un cliente frontend React. Puedes previsualizar el código y descargar el proyecto completo en ZIP.";
       suggestion = "Presiona el botón 'Generar Software' en la barra de herramientas.";
     } else {
-      answer = "Soy tu asistente inteligente de modelado UML y generación CASE. Puedo modificar el diagrama por ti mediante comandos de voz o texto ('Crea clase Usuario', 'Agrega atributo email a Usuario', 'Relaciona Usuario con Rol') y asistirte en el diseño de software.";
+      answer = "Soy tu asistente inteligente de modelado UML y generación CASE impulsado por GroqCloud. Puedo modificar el diagrama por ti mediante comandos de voz o texto ('Crea clase Usuario', 'Agrega atributo email a Usuario', 'Relaciona Usuario con Rol') y asistirte en el diseño de software.";
       suggestion = "Prueba el comando: 'Crear clase Producto con atributos nombre:String, precio:Double'";
     }
 
@@ -507,9 +570,6 @@ public class AiAssistantService {
   public ImageAnalysisResponse analyzeImage(UUID projectId, UUID diagramId, String email, AnalyzeImageRequest request) {
     projectService.requireCanEdit(projectId, email);
     validateDiagram(projectId, diagramId);
-    if (geminiModel == null || !geminiModel.matches("[A-Za-z0-9._-]{1,100}")) {
-      throw new BadRequestException("GEMINI_MODEL no tiene un identificador válido.");
-    }
     String image = request.imageBase64();
     if (image == null || image.length() > 14_000_000) throw new BadRequestException("La imagen está vacía o supera el máximo de 10 MB.");
     String mimeType = "image/png";
@@ -531,16 +591,13 @@ public class AiAssistantService {
       throw new BadRequestException("La imagen Base64 no es válida.");
     }
 
-    String apiKeyToUse = geminiApiKey;
-    if (apiKeyToUse == null || apiKeyToUse.isBlank()) apiKeyToUse = System.getenv("GEMINI_API_KEY");
-    if (apiKeyToUse == null || apiKeyToUse.isBlank()) apiKeyToUse = System.getenv("GOOGLE_API_KEY");
-
-    if (apiKeyToUse == null || apiKeyToUse.isBlank()) {
-      throw new BadRequestException("GEMINI_API_KEY no está configurada en backend/.env. Configura la propiedad GEMINI_API_KEY en el archivo backend/.env para habilitar la reconstrucción con Gemini Vision.");
+    if (llmProvider == null || !llmProvider.isConfigured()) {
+      log.info("LlmProvider no configurado; ejecutando fallback local para análisis de imagen.");
+      return analyzeWithLocalFallback(imageData, request.promptHint(), "El proveedor de IA no está configurado.");
     }
 
-    ImageModel model = analyzeWithGemini(imageData, mimeType, request.promptHint(), apiKeyToUse);
-    return new ImageAnalysisResponse(model, model.warnings(), "GEMINI");
+    ImageModel model = analyzeWithGroq(imageData, mimeType, request.promptHint());
+    return new ImageAnalysisResponse(model, model.warnings(), "GROQ");
   }
 
   private ImageAnalysisResponse analyzeWithLocalFallback(String imageBase64, String hint, String reason) {
@@ -583,6 +640,10 @@ public class AiAssistantService {
   }
 
   public ImageReconstructionResponse applyImageModel(UUID projectId, UUID diagramId, String email, ApplyImageModelRequest request) {
+    return applyImageModel(projectId, diagramId, email, request, null);
+  }
+
+  public ImageReconstructionResponse applyImageModel(UUID projectId, UUID diagramId, String email, ApplyImageModelRequest request, Long expectedRevision) {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = validateDiagram(projectId, diagramId);
     umlService.requireNotLocked(diagram, email);
@@ -592,6 +653,9 @@ public class AiAssistantService {
     if (request.mode() == null) throw new BadRequestException("Selecciona si deseas agregar o reemplazar el contenido.");
 
     List<String> warnings = new ArrayList<>(model.warnings());
+    long newRev = umlService.reserveNextRevision(diagramId, expectedRevision);
+    diagram.setRevision(newRev);
+
     if (request.mode() == ImageImportMode.REPLACE) {
       relationRepo.deleteByDiagramaId(diagramId);
       relationRepo.flush();
@@ -653,7 +717,7 @@ public class AiAssistantService {
       warnings.add("No se agregaron elementos nuevos; el contenido existente se conservó.");
       return new ImageReconstructionResponse(false, "No había elementos nuevos para agregar.", 0, 0, umlService.getDiagram(projectId, diagramId, email), List.copyOf(warnings));
     }
-    wsHandler.broadcastDiagramChanged(diagramId, request.mode() == ImageImportMode.REPLACE ? "IMAGE_MODEL_REPLACED" : "IMAGE_MODEL_ADDED");
+    umlService.notifyCollabAfterCommit(diagramId, request.mode() == ImageImportMode.REPLACE ? "IMAGE_MODEL_REPLACED" : "IMAGE_MODEL_ADDED", newRev);
     String message = "Se procesaron " + createdClasses + " elementos y " + createdRelations + " relaciones desde la imagen.";
     iaRepo.save(new InteraccionIa(diagram, user, "RECONSTRUCCION_IMAGEN", "Imagen: " + Objects.toString(request.filename(), "diagrama"), message, null));
     return new ImageReconstructionResponse(true, message, createdClasses, createdRelations, umlService.getDiagram(projectId, diagramId, email), List.copyOf(warnings));
@@ -668,153 +732,72 @@ public class AiAssistantService {
     return source + "|" + target + "|" + type;
   }
 
-  private ImageModel analyzeWithGemini(String imageBase64, String mimeType, String hint, String apiKeyToUse) {
-    List<String> modelsToTry = new ArrayList<>();
-    if (geminiModel != null && !geminiModel.isBlank()) modelsToTry.add(geminiModel.trim());
-    for (String m : List.of("gemini-3.8-flash", "gemini-flash-latest")) {
-      if (!modelsToTry.contains(m)) modelsToTry.add(m);
-    }
-
-    java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(20)).build();
-    String lastError = null;
-
-    for (String targetModel : modelsToTry) {
-      // Intentar Análisis en 2 Etapas (Paso 1: Elementos, Paso 2: Conexiones)
-      try {
-        String stage1Prompt = """
-            ETAPA 1: Extrae únicamente las CLASES, INTERFACES, CLASES ABSTRACTAS y ENUMERACIONES visibles en la imagen.
-            No inventes nada nuevo ni completes el modelo. La imagen es la fuente de verdad. Si un nombre o tipo no se distingue, omite ese elemento y explica por qué en warnings.
-            Para cada elemento extrae:
-            - "name": nombre exacto tal como aparece impreso.
-            - "type": "CLASE" | "INTERFAZ" | "CLASE_ABSTRACTA" | "ENUMERACION".
-            - "confidence": número 0.5..1.0.
-            - "x": coordenada X estimada en lienzo (80 a 2400), o null si no se estima.
-            - "y": coordenada Y estimada en lienzo (60 a 1600), o null si no se estima.
-            - "attributes": arreglo; cada atributo debe tener exactamente name,type,visibility,confidence. Usa null para tipo/visibilidad ilegibles.
-            - "methods": arreglo; cada método debe tener exactamente name,returnType,parameters,visibility,confidence. Usa null para datos ilegibles; parameters="" solo si la firma no muestra parámetros.
-            Cada clase debe tener exactamente name,type,confidence,x,y,attributes,methods. Devuelve ÚNICAMENTE JSON con exactamente las claves raíz classes y warnings.
-            """ + (hint == null || hint.isBlank() ? "" : "\nPista de dominio: " + hint.trim());
-
-        String stage1Text = callGeminiRaw(client, targetModel, apiKeyToUse, imageBase64, mimeType, stage1Prompt);
-        if (stage1Text != null && !stage1Text.isBlank()) {
-          JsonNode stage1Json = parseGeminiJsonNode(stage1Text);
-          JsonNode classesNode = stage1Json.path("classes");
-
-          if (classesNode.isArray() && classesNode.size() > 0) {
-            List<String> classNames = new ArrayList<>();
-            List<String> imageWarnings = new ArrayList<>();
-            JsonNode firstStageWarnings = stage1Json.path("warnings");
-            if (firstStageWarnings.isArray()) firstStageWarnings.forEach(w -> { if (w.isTextual() && !w.asText().isBlank()) imageWarnings.add(w.asText().trim()); });
-            for (JsonNode c : classesNode) {
-              String cn = c.path("name").asText("").trim();
-              if (!cn.isBlank()) classNames.add(cn);
+  private ImageModel analyzeWithGroq(String imageBase64, String mimeType, String hint) {
+    String unifiedPrompt = """
+        Perform an exhaustive reverse-engineering of this UML class diagram image into valid JSON:
+        Step 1: Extract EVERY visible class, interface, abstract class, and enumeration with its name, attributes, and methods.
+        Step 2: Inspect EVERY class boundary on all 4 sides for ALL connector lines (associations, inheritances, aggregations, compositions, dependencies).
+        Return ONLY valid JSON matching this exact schema:
+        {
+          "classes": [
+            {
+              "name": "ExactClassName",
+              "type": "CLASE" | "INTERFAZ" | "CLASE_ABSTRACTA" | "ENUMERACION",
+              "confidence": 0.95,
+              "x": 100.0,
+              "y": 120.0,
+              "attributes": [{"visibility": "-"|"+"|"#"|"~", "name": "attrName", "type": "String", "confidence": 0.9}],
+              "methods": [{"visibility": "+", "name": "methodName", "returnType": "void", "parameters": "", "confidence": 0.9}]
             }
-
-            String stage2Prompt = """
-                ETAPA 2: Analiza minuciosamente TODAS las relaciones y conexiones en el diagrama de la imagen.
-                Las clases identificadas en la imagen son: """ + classNames + """
-
-                Instrucción crítica: Inspecciona TODOS los 4 lados de CADA caja de clase en busca de líneas conectoras (asociaciones, herencias, agregaciones, composiciones, dependencias). Revisa visualmente ambos extremos de cada conector antes de decidir su tipo: un diamante negro/relleno identifica COMPOSICIÓN; un diamante blanco/vacío identifica AGREGACIÓN; un triángulo hueco que apunta a una clase identifica HERENCIA; una línea discontinua con punta abierta simple (sin triángulo de generalización) identifica DEPENDENCIA; una línea simple sin estos glifos es ASOCIACIÓN. No conviertas un conector con diamante o triángulo en asociación/dependencia.
-                En composición/agregación, source es la clase junto al diamante (el todo). En herencia, source es la subclase y target la clase a la que apunta el triángulo. En dependencia, source es la cola y target la punta. En asociación sin dirección, usa como source el extremo más a la izquierda (o más arriba si están alineados verticalmente). Las multiplicidades siempre se asignan por proximidad al extremo, no por orden de lectura.
-                Ten en cuenta que una sola clase (por ejemplo, Pago) puede tener MÚLTIPLES líneas de relación independientes hacia distintas clases (por ejemplo, Pago -> MetodoPago Y ADEMÁS Pago -> PasarelaPago). NO te detengas al encontrar 1 relación.
-                Para CADA línea conectora visible, extrae:
-                - "source": clase origen en el extremo inicial.
-                - "target": clase destino en el extremo final (en herencia, la punta triangular hueca apunta al destino padre).
-                - "type": "ASOCIACION" | "HERENCIA" | "AGREGACION" | "COMPOSICION" | "DEPENDENCIA".
-                - "name": nombre de la relación si existe impreso (ej. "realiza", "tiene", "procesa"), o null.
-                - "multiplicitySource": multiplicidad exacta junto al origen (ej. "1", "*", "0..1", "1..*", "0..*") o null.
-                - "multiplicityTarget": multiplicidad exacta junto al destino (ej. "1", "*", "0..1", "1..*", "0..*") o null.
-                - "confidence": número 0.5..1.0.
-                No asumas cardinalidades por defecto. Si el extremo, tipo o multiplicidad es incierto, omite esa relación o deja la multiplicidad null y explica la duda en warnings. Cada relación debe tener exactamente source,target,type,name,multiplicitySource,multiplicityTarget,confidence.
-                Devuelve ÚNICAMENTE JSON con exactamente las claves raíz relations y warnings.
-                """;
-
-            String stage2Text = callGeminiRaw(client, targetModel, apiKeyToUse, imageBase64, mimeType, stage2Prompt);
-            JsonNode relationsNode = null;
-            if (stage2Text != null && !stage2Text.isBlank()) {
-              JsonNode stage2Json = parseGeminiJsonNode(stage2Text);
-              relationsNode = stage2Json.path("relations");
-              JsonNode secondStageWarnings = stage2Json.path("warnings");
-              if (secondStageWarnings.isArray()) secondStageWarnings.forEach(w -> { if (w.isTextual() && !w.asText().isBlank()) imageWarnings.add(w.asText().trim()); });
+          ],
+          "relations": [
+            {
+              "source": "SourceClass",
+              "target": "TargetClass",
+              "type": "ASOCIACION" | "HERENCIA" | "AGREGACION" | "COMPOSICION" | "DEPENDENCIA",
+              "name": null,
+              "multiplicitySource": "1",
+              "multiplicityTarget": "*",
+              "confidence": 0.9
             }
-
-            ObjectNode mergedRoot = objectMapper.createObjectNode();
-            mergedRoot.set("classes", classesNode);
-            mergedRoot.set("relations", relationsNode != null && relationsNode.isArray() ? relationsNode : objectMapper.createArrayNode());
-            mergedRoot.set("warnings", objectMapper.valueToTree(imageWarnings));
-
-            ImageModel model = UmlImageModelValidator.parseAndValidate(mergedRoot.toString());
-            if (model != null && !model.classes().isEmpty()) {
-              log.info("Gemini Vision 2-Etapas [{}] reconoció {} clases y {} relaciones.", targetModel, model.classes().size(), model.relations().size());
-              return model;
-            }
-          }
+          ],
+          "warnings": []
         }
-      } catch (Exception e) {
-        log.warn("El análisis 2-etapas en Gemini [{}] no concluyó, intentando análisis unificado: {}", targetModel, e.getMessage());
-        lastError = e.getMessage();
-      }
+        Rules:
+        - In herencia: source is the subclass and target is the superclass.
+        - In composicion/agregacion: source is the owner class (near the diamond).
+        - Multiplicities: use exact strings like "1", "*", "0..1", "1..*".
+        - Do not output markdown code fences (```json). Return raw JSON only.
+        """ + (hint == null || hint.isBlank() ? "" : "\nDomain hint provided by developer: " + hint.trim());
 
-      // Reintento con Prompt Unificado Completo
-      try {
-        String unifiedPrompt = """
-            Perform an exhaustive 2-step analysis of this UML class diagram image:
-            Step 1: Extract all visible classes, interfaces, abstract classes, and enumerations, with their exact attributes, types, visibilities, and methods.
-            Step 2: Inspect EVERY class boundary for ALL outgoing or incoming connector lines, arrows, diamonds, or associations. A single class (e.g. Pago) can connect to multiple separate classes (e.g. Pago -> MetodoPago AND Pago -> PasarelaPago). Inspect all 4 sides of every class box.
-            Return ONLY one JSON object with exactly these root keys: classes, relations, warnings.
-            Each class: name, type (CLASE|INTERFAZ|CLASE_ABSTRACTA|ENUMERACION), confidence (0..1), x and y (canvas coordinates x 80..2400, y 80..1600), attributes (array), methods (array).
-            Each attribute: name, type, visibility (+|-|#|~), confidence (0..1). Each method: name, returnType, parameters, visibility (+|-|#|~), confidence (0..1).
-            Each relation: source, target, type (ASOCIACION|HERENCIA|AGREGACION|COMPOSICION|DEPENDENCIA), name, multiplicitySource and multiplicityTarget (exact UML multiplicity like "1", "*", "0..1", "1..*"), confidence (0..1).
-            Relation glyph rules: a filled diamond means COMPOSICION; a hollow diamond means AGREGACION; a hollow triangle pointing to the parent means HERENCIA; a dashed line with a simple open arrow (no generalization triangle) means DEPENDENCIA; a plain connector is ASOCIACION. Inspect both ends and do not downgrade diamonds or triangles to association. For composition/aggregation source is the diamond end, for inheritance source is the child, for dependency source is the tail, and for undirected association choose the leftmost endpoint (uppermost if vertically aligned). Map each multiplicity to the class end nearest its label. Never assume a default multiplicity; use null and warn if unreadable. Omit unclear links and describe uncertainty in warnings.
-            Keep Spanish identifiers exactly as printed. Do not output markdown code fences.
-            """ + (hint == null || hint.isBlank() ? "" : "\nDomain hint: " + hint.trim());
-
-        String text = callGeminiRaw(client, targetModel, apiKeyToUse, imageBase64, mimeType, unifiedPrompt);
-        if (text != null && !text.isBlank()) {
-          ImageModel model = UmlImageModelValidator.parseAndValidate(text);
-          if (model != null && !model.classes().isEmpty()) {
-            return model;
-          }
+    try {
+      LlmResponse response = llmProvider.analyzeImage(unifiedPrompt, imageBase64, mimeType, 1500);
+      if (response.success() && response.content() != null && !response.content().isBlank()) {
+        String jsonText = response.content().trim();
+        if (jsonText.startsWith("```")) {
+          int s = jsonText.indexOf('{');
+          int e = jsonText.lastIndexOf('}');
+          if (s >= 0 && e > s) jsonText = jsonText.substring(s, e + 1);
         }
-      } catch (Exception e) {
-        log.warn("Gemini Vision unificado [{}] falló: {}", targetModel, e.getMessage());
-        lastError = e.getMessage();
+        ImageModel model = UmlImageModelValidator.parseAndValidate(jsonText);
+        if (model != null && !model.classes().isEmpty()) {
+          log.info("GroqCloud Vision [{}] reconoció {} clases y {} relaciones.", llmProvider.getModelName(), model.classes().size(), model.relations().size());
+          return model;
+        }
+      } else {
+        log.warn("GroqCloud Vision falló: HTTP {} - {}", response.httpStatusCode(), response.errorMessage());
       }
+    } catch (Exception e) {
+      log.warn("Excepción al consultar visión en GroqCloud: {}", e.getMessage());
     }
 
-    if (lastError != null && !lastError.isBlank()) {
-      throw new BadRequestException("Error en respuesta de Gemini Vision: " + lastError);
-    }
-    throw new BadRequestException("Gemini no pudo reconocer clases en la imagen. Asegúrate de que el diagrama sea legible.");
+    // Fallback secundario si Groq Vision no extrae clases suficientes
+    log.info("GroqCloud Vision no detectó clases legibles; ejecutando fallback local.");
+    ImageAnalysisResponse fallbackResp = analyzeWithLocalFallback(imageBase64, hint, "GroqCloud Vision no reconoció clases en la imagen.");
+    return fallbackResp.model();
   }
 
-  private String callGeminiRaw(java.net.http.HttpClient client, String model, String apiKey, String imageBase64, String mimeType, String prompt) throws Exception {
-    ObjectNode root = objectMapper.createObjectNode();
-    ArrayNode content = root.putArray("contents").addObject().putArray("parts");
-    content.addObject().put("text", prompt);
-    content.addObject().putObject("inline_data").put("mime_type", mimeType).put("data", imageBase64);
-    root.putObject("generationConfig").put("response_mime_type", "application/json");
-
-    java.net.URI uri = java.net.URI.create("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent");
-    java.net.http.HttpRequest httpRequest = java.net.http.HttpRequest.newBuilder(uri)
-        .header("Content-Type", "application/json")
-        .header("x-goog-api-key", apiKey.trim())
-        .timeout(java.time.Duration.ofSeconds(45))
-        .POST(java.net.http.HttpRequest.BodyPublishers.ofString(root.toString()))
-        .build();
-
-    java.net.http.HttpResponse<String> response = client.send(httpRequest, java.net.http.HttpResponse.BodyHandlers.ofString());
-    if (response.statusCode() == 200) {
-      JsonNode responseJson = objectMapper.readTree(response.body());
-      return responseJson.path("candidates").path(0).path("content").path("parts").path(0).path("text").asText("");
-    } else {
-      String err = "HTTP " + response.statusCode() + ": " + response.body();
-      log.warn("Gemini Vision [{}] respondió error {}", model, err);
-      throw new IOException("Modelo " + model + " respondió " + err);
-    }
-  }
-
-  private JsonNode parseGeminiJsonNode(String text) {
+  private JsonNode parseLlmJsonNode(String text) {
     try {
       String clean = text.trim();
       if (clean.contains("```")) {
@@ -847,14 +830,13 @@ public class AiAssistantService {
     List<DetectedClass> detectedClasses = new ArrayList<>();
     List<DetectedRelation> detectedRelations = new ArrayList<>();
 
-    // 1. Si el usuario proporcionó clave de Google Gemini, priorizar visión multimodal de IA en el backend
-    String geminiKey = geminiApiKey;
-    if (geminiKey != null && !geminiKey.isBlank()) {
-      log.info("Iniciando análisis multimodal con Google Gemini Vision en backend...");
-      tryGeminiVision(request.imageBase64(), geminiKey, hint, detectedClasses, detectedRelations);
+    // 1. Si GroqCloud está configurado, priorizar visión multimodal de IA en backend
+    if (llmProvider != null && llmProvider.isConfigured()) {
+      log.info("Iniciando análisis multimodal con GroqCloud Vision en backend...");
+      tryGroqVision(request.imageBase64(), hint, detectedClasses, detectedRelations);
     }
 
-    // 2. Si no se usó Gemini o no detectó clases, usar lo detectado por el cliente
+    // 2. Si no se detectaron clases con Groq, usar lo detectado por el cliente
     if (detectedClasses.isEmpty() && request.clientDetectedClasses() != null && !request.clientDetectedClasses().isEmpty()) {
       for (AiRequests.LegacyDetectedClass cdc : request.clientDetectedClasses()) {
         if (cdc.name() == null || cdc.name().isBlank()) continue;
@@ -916,7 +898,7 @@ public class AiAssistantService {
 
     // Si después de todos los análisis no se detectó nada, retornar aviso claro sin inyectar datos falsos
     if (detectedClasses.isEmpty()) {
-      String message = "No se pudieron reconocer clases en la imagen. Asegúrate de que el diagrama sea legible o ingresa una clave de Google Gemini Vision para análisis multimodal.";
+      String message = "No se pudieron reconocer clases en la imagen. Asegúrate de que el diagrama sea legible o configura GROQ_API_KEY en backend/.env.";
       DiagramFullView currentDiagram = umlService.getDiagram(projectId, diagramId, email);
       return new ImageReconstructionResponse(false, message, 0, 0, currentDiagram);
     }
@@ -1060,73 +1042,39 @@ public class AiAssistantService {
     return new ImageReconstructionResponse(true, message, detectedClasses.size(), relsCreated, updatedDiagram);
   }
 
-  private boolean tryGeminiVision(String base64Image, String apiKey, String hint, List<DetectedClass> outClasses, List<DetectedRelation> outRelations) {
-    if (apiKey == null || apiKey.isBlank()) return false;
+  private boolean tryGroqVision(String base64Image, String hint, List<DetectedClass> outClasses, List<DetectedRelation> outRelations) {
+    if (llmProvider == null || !llmProvider.isConfigured() || base64Image == null || base64Image.isBlank()) return false;
     try {
       String cleanBase64 = base64Image.contains(",")
           ? base64Image.substring(base64Image.indexOf(",") + 1)
           : base64Image;
-
       String mimeType = base64Image.startsWith("data:image/png") ? "image/png" : "image/jpeg";
 
-      String prompt = "You are an expert UML Reverse Engineering system. Perform a 2-stage visual analysis of this UML diagram image in detail.\n" +
-          "Stage 1: Extract EVERY class, interface, abstract class and enumeration with its name, attributes, and methods.\n" +
-          "Stage 2: Inspect all 4 sides of EVERY class box for ALL outgoing or incoming connector lines (associations, inheritances, aggregations, compositions, dependencies).\n" +
-          "Note that a class (e.g. Pago) may connect to multiple distinct classes (e.g. MetodoPago and PasarelaPago). Do not omit any visible relationship line.\n" +
-          "For each class: name, attributes (visibility: '-'|'+'|'#', name, type), methods (visibility, name, returnType), estimated posX (left=100, center=480, right=860) and posY (top=80, bottom=420).\n" +
-          "For each relationship: source, target, name (e.g. 'realiza', 'tiene', 'corresponde a'), tipo ('ASOCIACION'|'HERENCIA'|'AGREGACION'|'COMPOSICION'|'DEPENDENCIA'), multSource, multTarget.\n" +
-          "Return ONLY valid JSON matching this format: {\"classes\": [...], \"relations\": [...]}" +
-          (hint == null || hint.isBlank() ? "" : "\nDomain context supplied by the user (use only to disambiguate labels; do not invent classes or links): " + hint.trim());
+      String prompt = """
+          You are an expert UML Reverse Engineering system. Perform a visual analysis of this UML diagram image in detail.
+          Stage 1: Extract EVERY class, interface, abstract class and enumeration with its name, attributes, and methods.
+          Stage 2: Inspect all 4 sides of EVERY class box for ALL connector lines (associations, inheritances, aggregations, compositions, dependencies).
+          For each class: name, attributes (visibility: '-'|'+'|'#', name, type), methods (visibility, name, returnType), estimated posX (100..860) and posY (80..420).
+          For each relationship: source, target, name, tipo ('ASOCIACION'|'HERENCIA'|'AGREGACION'|'COMPOSICION'|'DEPENDENCIA'), multSource, multTarget.
+          Return ONLY valid JSON matching this format: {"classes": [...], "relations": [...]}
+          """ + (hint == null || hint.isBlank() ? "" : "\nDomain context: " + hint.trim());
 
-      ObjectNode rootNode = objectMapper.createObjectNode();
-      ArrayNode contents = rootNode.putArray("contents");
-      ObjectNode content = contents.addObject();
-      ArrayNode parts = content.putArray("parts");
-      parts.addObject().put("text", prompt);
-
-      ObjectNode inlineData = parts.addObject().putObject("inline_data");
-      inlineData.put("mime_type", mimeType);
-      inlineData.put("data", cleanBase64);
-
-      ObjectNode genConfig = rootNode.putObject("generationConfig");
-      genConfig.put("response_mime_type", "application/json");
-
-      String[] models = {"gemini-3.8-flash", "gemini-flash-latest"};
-      java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
-          .connectTimeout(java.time.Duration.ofSeconds(12))
-          .build();
-
-      for (String model : models) {
-        java.net.URI uri = java.net.URI.create("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent");
-        java.net.http.HttpRequest httpReq = java.net.http.HttpRequest.newBuilder(uri)
-            .header("Content-Type", "application/json")
-            .header("x-goog-api-key", apiKey.trim())
-            .timeout(java.time.Duration.ofSeconds(25))
-            .POST(java.net.http.HttpRequest.BodyPublishers.ofString(rootNode.toString()))
-            .build();
-
-        java.net.http.HttpResponse<String> resp = client.send(httpReq, java.net.http.HttpResponse.BodyHandlers.ofString());
-        if (resp.statusCode() == 200) {
-          JsonNode resJson = objectMapper.readTree(resp.body());
-          String text = resJson.path("candidates").path(0).path("content").path("parts").path(0).path("text").asText("");
-          if (!text.isBlank()) {
-            int jsonStart = text.indexOf('{');
-            int jsonEnd = text.lastIndexOf('}');
-            if (jsonStart >= 0 && jsonEnd > jsonStart) {
-              JsonNode parsed = objectMapper.readTree(text.substring(jsonStart, jsonEnd + 1));
-              parseJsonIntoDetectedElements(parsed, outClasses, outRelations);
-              if (!outClasses.isEmpty()) {
-                log.info("Gemini Vision [{}] reconoció exitosamente {} clases y {} relaciones.", model, outClasses.size(), outRelations.size());
-                return true;
-              }
-            }
+      LlmResponse resp = llmProvider.analyzeImage(prompt, cleanBase64, mimeType, 1500);
+      if (resp.success() && resp.content() != null && !resp.content().isBlank()) {
+        String textResp = resp.content().trim();
+        int jsonStart = textResp.indexOf('{');
+        int jsonEnd = textResp.lastIndexOf('}');
+        if (jsonStart >= 0 && jsonEnd > jsonStart) {
+          JsonNode parsed = objectMapper.readTree(textResp.substring(jsonStart, jsonEnd + 1));
+          parseJsonIntoDetectedElements(parsed, outClasses, outRelations);
+          if (!outClasses.isEmpty()) {
+            log.info("GroqCloud Vision [{}] reconoció exitosamente {} clases y {} relaciones.", llmProvider.getModelName(), outClasses.size(), outRelations.size());
+            return true;
           }
-        } else {
-          log.warn("Gemini Vision [{}] status {}: {}", model, resp.statusCode(), resp.body());
         }
       }
     } catch (Exception e) {
-      log.warn("Error consultando Gemini Vision en backend: {}", e.getMessage());
+      log.warn("Error consultando GroqCloud Vision en backend: {}", e.getMessage());
     }
     return false;
   }
@@ -1719,30 +1667,44 @@ public class AiAssistantService {
     return diagram;
   }
 
-  /** Interpreta lenguaje natural de CU10; el parser existente sigue ejecutando UML. */
-  private List<String> interpretCommandWithGemini(UUID diagramId, String email, String userText) {
-    if (geminiApiKey == null || geminiApiKey.isBlank() || userText == null || userText.isBlank()) return null;
+  /** Interpreta lenguaje natural de CU10 con GroqCloud (Qwen); el parser determinista sigue ejecutando las operaciones UML. */
+  private List<String> interpretCommandWithGroq(UUID diagramId, String email, String userText) {
+    if (llmProvider == null || !llmProvider.isConfigured() || userText == null || userText.isBlank()) return null;
     try {
       String context = buildCommandContext(diagramId, email);
-      String prompt = """
-          Eres el intérprete de lenguaje natural de un editor UML. No ejecutes operaciones y no devuelvas explicaciones.
-          Devuelve únicamente JSON válido con esta forma: {"operaciones":[{...}]}.
-          Cada operación debe usar una acción permitida: CREAR_CLASE, AGREGAR_ATRIBUTOS, EDITAR_ELEMENTO,
-          CREAR_RELACION, ESTABLECER_MULTIPLICIDAD, CAMBIAR_TIPO_RELACION, CREAR_CLASE_INTERMEDIA,
-          CREAR_GENERALIZACION, CREAR_COMPOSICION, CREAR_AGREGACION o ELIMINAR_ELEMENTO.
-          Campos admitidos: accion, clase, nombre, nuevoNombre, atributos (arreglo de {nombre,tipo}),
-          origen, destino, tipoRelacion, multiplicidadOrigen, multiplicidadDestino,
-          claseIntermedia. Usa nombres exactos del usuario o del contexto.
-          Para relaciones sin multiplicidad explícita deja ambas multiplicidades como null.
-          Normaliza equivalencias naturales: hereda/deriva/generaliza a GENERALIZACION;
-          compuesto/forma parte a COMPOSICION; agrupa/pertenece a AGREGACION.
+      String systemPrompt = """
+          Eres el intérprete de lenguaje natural de un editor UML. Tu función es traducir las intenciones del usuario en comandos UML estructurados.
+          No ejecutes operaciones por tu cuenta y no devuelvas prosa, explicaciones ni bloques de código markdown.
+          Devuelve ÚNICAMENTE un objeto JSON válido con exactamente esta forma:
+          {"operaciones":[{"accion":"...", ...}]}
+          Acciones permitidas: CREAR_CLASE, AGREGAR_ATRIBUTOS, EDITAR_ELEMENTO, CREAR_RELACION,
+          ESTABLECER_MULTIPLICIDAD, CAMBIAR_TIPO_RELACION, CREAR_CLASE_INTERMEDIA, CREAR_GENERALIZACION,
+          CREAR_COMPOSICION, CREAR_AGREGACION, ELIMINAR_ELEMENTO.
+          Campos admitidos en cada operación:
+          - accion: una de las acciones permitidas arriba.
+          - clase / nombre: nombre exacto del elemento.
+          - nuevoNombre: nombre destino en renombre/edición.
+          - atributos: arreglo de objetos {"nombre":"...", "tipo":"..."}.
+          - origen, destino: clases conectadas.
+          - tipoRelacion: "asociacion", "herencia", "composicion", "agregacion", "dependencia".
+          - multiplicidadOrigen, multiplicidadDestino: cardinalidades UML como "1", "*", "0..1", "1..*", o null.
+          - claseIntermedia: nombre de la tabla/clase intermedia en relaciones muchos a muchos.
           Si la intención no es una operación UML permitida, devuelve {"operaciones":[]}.
+          """;
 
-          CONTEXTO DEL DIAGRAMA:
-          """ + context + "\n\nUSUARIO: " + userText.trim();
+      String userPrompt = "CONTEXTO DEL DIAGRAMA:\n" + context + "\n\nINSTRUCCIÓN DEL USUARIO:\n" + userText.trim();
 
-      String response = callGeminiText(prompt, geminiApiKey.trim());
-      JsonNode root = parseGeminiJsonNode(response);
+      LlmResponse llmResp = llmProvider.chat(List.of(
+          LlmMessage.system(systemPrompt),
+          LlmMessage.user(userPrompt)
+      ), 800, 0.1);
+
+      if (!llmResp.success() || llmResp.content() == null || llmResp.content().isBlank()) {
+        log.warn("LlmProvider devolvió respuesta vacía o fallida en CU10: {}", llmResp.errorMessage());
+        return null;
+      }
+
+      JsonNode root = parseLlmJsonNode(llmResp.content());
       JsonNode operations = root.path("operaciones");
       if (!operations.isArray() || operations.isEmpty()) {
         operations = root.has("accion") ? objectMapper.createArrayNode().add(root) : operations;
@@ -1756,7 +1718,7 @@ public class AiAssistantService {
       }
       return commands.isEmpty() ? null : commands;
     } catch (Exception e) {
-      log.warn("No se pudo interpretar el comando CU10 con Gemini; se usará el parser local: {}", e.getMessage());
+      log.warn("No se pudo interpretar el comando CU10 con Groq; se usará el parser determinista local: {}", e.getMessage());
       return null;
     }
   }
@@ -1872,24 +1834,7 @@ public class AiAssistantService {
     return command != null && command.trim().toLowerCase(Locale.ROOT).matches("(?s).*\\b(create|alter|drop)\\s+table\\b.*");
   }
 
-  private String callGeminiText(String prompt, String apiKey) throws Exception {
-    ObjectNode root = objectMapper.createObjectNode();
-    root.putArray("contents").addObject().putArray("parts").addObject().put("text", prompt);
-    root.putObject("generationConfig").put("response_mime_type", "application/json");
-    java.net.URI uri = java.net.URI.create("https://generativelanguage.googleapis.com/v1beta/models/"
-        + geminiModel.trim() + ":generateContent");
-    java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder(uri)
-        .header("Content-Type", "application/json")
-        .header("x-goog-api-key", apiKey)
-        .timeout(java.time.Duration.ofSeconds(30))
-        .POST(java.net.http.HttpRequest.BodyPublishers.ofString(root.toString()))
-        .build();
-    java.net.http.HttpResponse<String> response = java.net.http.HttpClient.newHttpClient()
-        .send(request, java.net.http.HttpResponse.BodyHandlers.ofString());
-    if (response.statusCode() != 200) throw new IOException("Gemini HTTP " + response.statusCode());
-    return objectMapper.readTree(response.body()).path("candidates").path(0).path("content")
-        .path("parts").path(0).path("text").asText("");
-  }
+
 
   /** Normaliza las formas habituales del dictado antes de aplicar el parser CU10. */
   private String normalizeVoiceCommand(String command) {

@@ -43,6 +43,10 @@ public class SqlDdlParserService {
   }
 
   public DiagramFullView parseAndImportSql(UUID projectId, UUID diagramId, String email, String sqlContent) {
+    return parseAndImportSql(projectId, diagramId, email, sqlContent, null);
+  }
+
+  public DiagramFullView parseAndImportSql(UUID projectId, UUID diagramId, String email, String sqlContent, Long expectedRevision) {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = diagramRepo.findById(diagramId)
         .orElseThrow(() -> new NotFoundException("Diagrama no encontrado."));
@@ -58,6 +62,9 @@ public class SqlDdlParserService {
     if (parsedTables.isEmpty()) {
       throw new BadRequestException("No se encontraron sentencias CREATE TABLE válidas en el script SQL provisto.");
     }
+
+    long newRev = umlService.reserveNextRevision(diagramId, expectedRevision);
+    diagram.setRevision(newRev);
 
     // 1. Guardar elementos de clase UML para cada tabla
     Map<String, ElementoUML> classMapByRawName = new HashMap<>();
@@ -137,7 +144,20 @@ public class SqlDdlParserService {
       }
     }
 
-    wsHandler.broadcastDiagramChanged(diagramId, "SQL_IMPORTED");
+    if (wsHandler != null) {
+      if (org.springframework.transaction.support.TransactionSynchronizationManager.isSynchronizationActive()) {
+        org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+            new org.springframework.transaction.support.TransactionSynchronization() {
+              @Override
+              public void afterCommit() {
+                wsHandler.broadcastDiagramChanged(diagramId, "SQL_IMPORTED");
+              }
+            }
+        );
+      } else {
+        wsHandler.broadcastDiagramChanged(diagramId, "SQL_IMPORTED");
+      }
+    }
     return umlService.getDiagram(projectId, diagramId, email);
   }
 

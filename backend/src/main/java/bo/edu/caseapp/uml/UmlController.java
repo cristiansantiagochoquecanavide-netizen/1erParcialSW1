@@ -5,6 +5,8 @@ import bo.edu.caseapp.uml.UmlResponses.*;
 import bo.edu.caseapp.uml.relational.RelationalSchema;
 import bo.edu.caseapp.uml.relational.SqlDdlParserService;
 import bo.edu.caseapp.uml.validation.ValidationReport;
+import bo.edu.caseapp.error.BadRequestException;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import java.util.List;
 import java.util.UUID;
@@ -31,9 +33,15 @@ public class UmlController {
       @PathVariable UUID projectId,
       @PathVariable UUID diagramId,
       Authentication auth,
-      @RequestBody ImportSqlRequest request
+      @RequestBody ImportSqlRequest request,
+      @RequestHeader(value = "X-Diagram-Revision", required = false) Long revisionHeader,
+      @RequestHeader(value = "If-Match", required = false) String ifMatch,
+      HttpServletResponse response
   ) {
-    return sqlDdlParserService.parseAndImportSql(projectId, diagramId, auth.getName(), request.sql());
+    Long expectedRev = requireExpectedRevision(revisionHeader, ifMatch, null);
+    DiagramFullView view = sqlDdlParserService.parseAndImportSql(projectId, diagramId, auth.getName(), request.sql(), expectedRev);
+    response.setHeader("X-Diagram-Revision", String.valueOf(service.getDiagramRevision(diagramId)));
+    return view;
   }
 
   @GetMapping
@@ -83,14 +91,40 @@ public class UmlController {
     return service.generateRelationalSchema(projectId, diagramId, auth.getName());
   }
 
+  private Long resolveExpectedRevision(Long headerRevision, String ifMatch, Long bodyRevision) {
+    if (headerRevision != null) return headerRevision;
+    if (ifMatch != null && !ifMatch.isBlank()) {
+      String clean = ifMatch.replace("\"", "").trim();
+      try {
+        return Long.parseLong(clean);
+      } catch (NumberFormatException ignored) {}
+    }
+    return bodyRevision;
+  }
+
+  private Long requireExpectedRevision(Long headerRevision, String ifMatch, Long bodyRevision) {
+    Long rev = resolveExpectedRevision(headerRevision, ifMatch, bodyRevision);
+    if (rev == null) {
+      throw new BadRequestException("Se requiere la revisión esperada del diagrama ('X-Diagram-Revision' o 'expectedRevision') para verificar la concurrencia optimista.");
+    }
+    return rev;
+  }
+
   @PutMapping("/{diagramId}")
   public DiagramSummary update(
       @PathVariable UUID projectId,
       @PathVariable UUID diagramId,
       Authentication auth,
-      @Valid @RequestBody UpdateDiagram request
+      @Valid @RequestBody UpdateDiagram request,
+      @RequestHeader(value = "X-Diagram-Revision", required = false) Long revisionHeader,
+      @RequestHeader(value = "If-Match", required = false) String ifMatch,
+      HttpServletResponse response
   ) {
-    return service.updateDiagram(projectId, diagramId, auth.getName(), request);
+    Long expectedRev = requireExpectedRevision(revisionHeader, ifMatch, request.expectedRevision());
+    UpdateDiagram resolved = new UpdateDiagram(request.nombre(), request.descripcion(), expectedRev);
+    DiagramSummary summary = service.updateDiagram(projectId, diagramId, auth.getName(), resolved);
+    response.setHeader("X-Diagram-Revision", String.valueOf(summary.revision()));
+    return summary;
   }
 
   @DeleteMapping("/{diagramId}")
@@ -98,9 +132,12 @@ public class UmlController {
   public void delete(
       @PathVariable UUID projectId,
       @PathVariable UUID diagramId,
-      Authentication auth
+      Authentication auth,
+      @RequestHeader(value = "X-Diagram-Revision", required = false) Long revisionHeader,
+      @RequestHeader(value = "If-Match", required = false) String ifMatch
   ) {
-    service.deleteDiagram(projectId, diagramId, auth.getName());
+    Long expectedRev = requireExpectedRevision(revisionHeader, ifMatch, null);
+    service.deleteDiagram(projectId, diagramId, auth.getName(), expectedRev);
   }
 
   @PostMapping("/{diagramId}/elements")
@@ -109,9 +146,17 @@ public class UmlController {
       @PathVariable UUID projectId,
       @PathVariable UUID diagramId,
       Authentication auth,
-      @Valid @RequestBody SaveElement request
+      @Valid @RequestBody SaveElement request,
+      @RequestHeader(value = "X-Diagram-Revision", required = false) Long revisionHeader,
+      @RequestHeader(value = "If-Match", required = false) String ifMatch,
+      HttpServletResponse response
   ) {
-    return service.createElement(projectId, diagramId, auth.getName(), request);
+    Long expectedRev = requireExpectedRevision(revisionHeader, ifMatch, request.expectedRevision());
+    SaveElement resolved = new SaveElement(request.id(), request.tipoElemento(), request.nombre(),
+        request.posicionX(), request.posicionY(), request.propiedadesJson(), expectedRev);
+    ElementDetail detail = service.createElement(projectId, diagramId, auth.getName(), resolved);
+    response.setHeader("X-Diagram-Revision", String.valueOf(service.getDiagramRevision(diagramId)));
+    return detail;
   }
 
   @PutMapping("/{diagramId}/elements/{elementId}")
@@ -120,9 +165,18 @@ public class UmlController {
       @PathVariable UUID diagramId,
       @PathVariable UUID elementId,
       Authentication auth,
-      @Valid @RequestBody SaveElement request
+      @Valid @RequestBody SaveElement request,
+      @RequestHeader(value = "X-Diagram-Revision", required = false) Long revisionHeader,
+      @RequestHeader(value = "If-Match", required = false) String ifMatch,
+      HttpServletResponse response
   ) {
-    return service.updateElement(projectId, diagramId, auth.getName(), elementId, request);
+    Long expectedRev = requireExpectedRevision(revisionHeader, ifMatch, request.expectedRevision());
+    SaveElement resolved = new SaveElement(request.id() != null ? request.id() : elementId,
+        request.tipoElemento(), request.nombre(), request.posicionX(), request.posicionY(),
+        request.propiedadesJson(), expectedRev);
+    ElementDetail detail = service.updateElement(projectId, diagramId, auth.getName(), elementId, resolved);
+    response.setHeader("X-Diagram-Revision", String.valueOf(service.getDiagramRevision(diagramId)));
+    return detail;
   }
 
   @PostMapping("/{diagramId}/elements/positions")
@@ -131,9 +185,15 @@ public class UmlController {
       @PathVariable UUID projectId,
       @PathVariable UUID diagramId,
       Authentication auth,
-      @Valid @RequestBody SyncPositions request
+      @Valid @RequestBody SyncPositions request,
+      @RequestHeader(value = "X-Diagram-Revision", required = false) Long revisionHeader,
+      @RequestHeader(value = "If-Match", required = false) String ifMatch,
+      HttpServletResponse response
   ) {
-    service.syncPositions(projectId, diagramId, auth.getName(), request);
+    Long expectedRev = requireExpectedRevision(revisionHeader, ifMatch, request.expectedRevision());
+    SyncPositions resolved = new SyncPositions(request.positions(), expectedRev);
+    service.syncPositions(projectId, diagramId, auth.getName(), resolved);
+    response.setHeader("X-Diagram-Revision", String.valueOf(service.getDiagramRevision(diagramId)));
   }
 
   @DeleteMapping("/{diagramId}/elements/{elementId}")
@@ -142,9 +202,14 @@ public class UmlController {
       @PathVariable UUID projectId,
       @PathVariable UUID diagramId,
       @PathVariable UUID elementId,
-      Authentication auth
+      Authentication auth,
+      @RequestHeader(value = "X-Diagram-Revision", required = false) Long revisionHeader,
+      @RequestHeader(value = "If-Match", required = false) String ifMatch,
+      HttpServletResponse response
   ) {
-    service.deleteElement(projectId, diagramId, auth.getName(), elementId);
+    Long expectedRev = requireExpectedRevision(revisionHeader, ifMatch, null);
+    service.deleteElement(projectId, diagramId, auth.getName(), elementId, expectedRev);
+    response.setHeader("X-Diagram-Revision", String.valueOf(service.getDiagramRevision(diagramId)));
   }
 
   @PostMapping("/{diagramId}/relations")
@@ -153,9 +218,17 @@ public class UmlController {
       @PathVariable UUID projectId,
       @PathVariable UUID diagramId,
       Authentication auth,
-      @Valid @RequestBody SaveRelation request
+      @Valid @RequestBody SaveRelation request,
+      @RequestHeader(value = "X-Diagram-Revision", required = false) Long revisionHeader,
+      @RequestHeader(value = "If-Match", required = false) String ifMatch,
+      HttpServletResponse response
   ) {
-    return service.createRelation(projectId, diagramId, auth.getName(), request);
+    Long expectedRev = requireExpectedRevision(revisionHeader, ifMatch, request.expectedRevision());
+    SaveRelation resolved = new SaveRelation(request.id(), request.elementoOrigen(), request.elementoDestino(),
+        request.nombreRelacion(), request.tipoRelacion(), request.multiplicidadOrigen(), request.multiplicidadDestino(), expectedRev);
+    RelationDetail detail = service.createRelation(projectId, diagramId, auth.getName(), resolved);
+    response.setHeader("X-Diagram-Revision", String.valueOf(service.getDiagramRevision(diagramId)));
+    return detail;
   }
 
   @PutMapping("/{diagramId}/relations/{relationId}")
@@ -164,9 +237,18 @@ public class UmlController {
       @PathVariable UUID diagramId,
       @PathVariable UUID relationId,
       Authentication auth,
-      @Valid @RequestBody SaveRelation request
+      @Valid @RequestBody SaveRelation request,
+      @RequestHeader(value = "X-Diagram-Revision", required = false) Long revisionHeader,
+      @RequestHeader(value = "If-Match", required = false) String ifMatch,
+      HttpServletResponse response
   ) {
-    return service.updateRelation(projectId, diagramId, auth.getName(), relationId, request);
+    Long expectedRev = requireExpectedRevision(revisionHeader, ifMatch, request.expectedRevision());
+    SaveRelation resolved = new SaveRelation(request.id() != null ? request.id() : relationId,
+        request.elementoOrigen(), request.elementoDestino(), request.nombreRelacion(),
+        request.tipoRelacion(), request.multiplicidadOrigen(), request.multiplicidadDestino(), expectedRev);
+    RelationDetail detail = service.updateRelation(projectId, diagramId, auth.getName(), relationId, resolved);
+    response.setHeader("X-Diagram-Revision", String.valueOf(service.getDiagramRevision(diagramId)));
+    return detail;
   }
 
   @DeleteMapping("/{diagramId}/relations/{relationId}")
@@ -175,8 +257,13 @@ public class UmlController {
       @PathVariable UUID projectId,
       @PathVariable UUID diagramId,
       @PathVariable UUID relationId,
-      Authentication auth
+      Authentication auth,
+      @RequestHeader(value = "X-Diagram-Revision", required = false) Long revisionHeader,
+      @RequestHeader(value = "If-Match", required = false) String ifMatch,
+      HttpServletResponse response
   ) {
-    service.deleteRelation(projectId, diagramId, auth.getName(), relationId);
+    Long expectedRev = requireExpectedRevision(revisionHeader, ifMatch, null);
+    service.deleteRelation(projectId, diagramId, auth.getName(), relationId, expectedRev);
+    response.setHeader("X-Diagram-Revision", String.valueOf(service.getDiagramRevision(diagramId)));
   }
 }

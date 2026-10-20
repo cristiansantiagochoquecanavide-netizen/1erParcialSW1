@@ -9,6 +9,7 @@ type Props = {
   diagramId: string
   diagramName: string
   token: string
+  revision?: number
   isReadOnly: boolean
   isLocked?: boolean
   lockUser?: string | null
@@ -22,6 +23,7 @@ export function XmiModal({
   diagramId,
   diagramName,
   token,
+  revision,
   isReadOnly,
   isLocked = false,
   lockUser = null,
@@ -121,7 +123,8 @@ export function XmiModal({
         method: 'POST',
         headers: {
           'Content-Type': contentType,
-          Authorization: `Bearer ${token}`
+          Authorization: `Bearer ${token}`,
+          'X-Diagram-Revision': String(revision ?? 1)
         },
         body: importText
       })

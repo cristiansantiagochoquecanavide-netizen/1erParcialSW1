@@ -15,6 +15,7 @@ type Props = {
   projectId: string
   diagramId: string
   token: string
+  revision?: number
   onClose: () => void
   onDiagramUpdated: (fullView: DiagramFullView) => void
   onError: (err: unknown) => void
@@ -43,6 +44,7 @@ export function AiAssistantModal({
   projectId,
   diagramId,
   token,
+  revision,
   onClose,
   onDiagramUpdated,
   onError,
@@ -75,7 +77,7 @@ export function AiAssistantModal({
   const [imagePromptHint, setImagePromptHint] = useState('')
   const [analyzingStatus, setAnalyzingStatus] = useState<string | null>(null)
   const [imageModel, setImageModel] = useState<ImageModel | null>(null)
-  const [imageProvider, setImageProvider] = useState<'GEMINI' | 'LOCAL' | null>(null)
+  const [imageProvider, setImageProvider] = useState<'GROQ' | 'LOCAL' | null>(null)
   const [imageError, setImageError] = useState<string | null>(null)
   const [imageMode, setImageMode] = useState<'ADD' | 'REPLACE'>('ADD')
   const [reconstructResult, setReconstructResult] = useState<{
@@ -156,7 +158,7 @@ export function AiAssistantModal({
         const body = await res.json().catch(() => ({}))
         throw new Error(body.message || 'No se pudo analizar la imagen.')
       }
-      const data = await res.json() as { model: ImageModel; warnings: string[]; provider: 'GEMINI' | 'LOCAL' }
+      const data = await res.json() as { model: ImageModel; warnings: string[]; provider: 'GROQ' | 'LOCAL' }
       setAnalyzingStatus(null)
       setImageModel(data.model)
       setImageProvider(data.provider)
@@ -187,7 +189,8 @@ export function AiAssistantModal({
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
+          Authorization: `Bearer ${token}`,
+          'X-Diagram-Revision': String(revision ?? 1)
         },
         body: JSON.stringify({
           mode: imageMode,
@@ -402,7 +405,8 @@ export function AiAssistantModal({
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`
+            Authorization: `Bearer ${token}`,
+            'X-Diagram-Revision': String(revision ?? 1)
           },
           body: JSON.stringify({
             command: query,
@@ -502,7 +506,7 @@ export function AiAssistantModal({
         {mode === 'image' ? (
           <div className="ai-modal-panel ai-image-panel" style={{ flex: 1, overflowY: 'visible', padding: 0, display: 'flex', flexDirection: 'column', gap: '1rem' }}>
             <div style={{ background: '#f8fafc', border: '1px solid #cbd5e1', borderRadius: '8px', padding: '0.85rem', fontSize: '0.85rem', color: '#1e293b' }}>
-              <strong>Imagen → modelo UML:</strong> Gemini analizará la imagen y devolverá elementos UML estructurados. Podrás revisar el resultado y advertencias antes de aplicarlo al lienzo.
+              <strong>Imagen → modelo UML:</strong> El modelo de visión (Groq / Qwen) analizará la imagen y devolverá elementos UML estructurados. Podrás revisar el resultado y advertencias antes de aplicarlo al lienzo.
             </div>
 
             <div
@@ -565,7 +569,7 @@ export function AiAssistantModal({
                     Modelo detectado ({imageModel.classes.length} elementos, {imageModel.relations.length} relaciones)
                   </span>
                   <span style={{ fontSize: '0.78rem', padding: '0.2rem 0.6rem', background: '#dbeafe', color: '#1e40af', borderRadius: '999px', fontWeight: 'bold' }}>
-                    {imageProvider === 'GEMINI' ? 'Gemini · JSON validado' : 'Fallback local · JSON validado'}
+                    {imageProvider === 'GROQ' ? 'Groq (Qwen) · JSON validado' : 'Fallback local · JSON validado'}
                   </span>
                 </div>
 
@@ -602,8 +606,8 @@ export function AiAssistantModal({
             )}
 
             <div style={{ border: '1px solid #cbd5e1', borderRadius: '8px', padding: '0.65rem 0.85rem', background: '#f8fafc', color: '#334155', fontSize: '0.8rem' }}>
-              <strong>Gemini en backend · fallback local</strong>
-              <div style={{ marginTop: '0.3rem' }}>La clave nunca se envía al navegador. Si Gemini no está disponible, se intenta el reconocimiento local; todas las respuestas pasan por validación antes de permitir su aplicación.</div>
+              <strong>GroqCloud (Qwen) en backend · fallback local</strong>
+              <div style={{ marginTop: '0.3rem' }}>La clave nunca se envía al navegador. Si Groq no está disponible, se intenta el reconocimiento local; todas las respuestas pasan por validación antes de permitir su aplicación.</div>
             </div>
 
             {hasExistingContent && (

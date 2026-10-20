@@ -45,8 +45,27 @@ public class VersionController {
       @PathVariable UUID projectId,
       @PathVariable UUID diagramId,
       @PathVariable UUID versionId,
-      Authentication auth
+      Authentication auth,
+      @RequestHeader(value = "X-Diagram-Revision", required = false) Long revisionHeader,
+      @RequestHeader(value = "If-Match", required = false) String ifMatch,
+      jakarta.servlet.http.HttpServletResponse response
   ) {
-    return versionService.restoreVersion(projectId, diagramId, versionId, auth.getName());
+    Long expectedRev = requireExpectedRevision(revisionHeader, ifMatch);
+    DiagramFullView view = versionService.restoreVersion(projectId, diagramId, versionId, auth.getName(), expectedRev);
+    if (view.diagram() != null) {
+      response.setHeader("X-Diagram-Revision", String.valueOf(view.diagram().revision()));
+    }
+    return view;
+  }
+
+  private Long requireExpectedRevision(Long headerRevision, String ifMatch) {
+    if (headerRevision != null) return headerRevision;
+    if (ifMatch != null && !ifMatch.isBlank()) {
+      try {
+        return Long.parseLong(ifMatch.replace("\"", "").trim());
+      } catch (NumberFormatException ignored) {}
+    }
+    throw new bo.edu.caseapp.error.BadRequestException(
+        "Se requiere la revisión esperada del diagrama ('X-Diagram-Revision' o 'If-Match') para verificar la concurrencia optimista.");
   }
 }

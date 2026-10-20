@@ -30,9 +30,16 @@ public class AiController {
       @PathVariable UUID projectId,
       @PathVariable UUID diagramId,
       Authentication auth,
-      @Valid @RequestBody CommandRequest request
+      @Valid @RequestBody CommandRequest request,
+      @RequestHeader(value = "X-Diagram-Revision", required = false) Long revisionHeader,
+      @RequestHeader(value = "If-Match", required = false) String ifMatch,
+      jakarta.servlet.http.HttpServletResponse response
   ) {
-    return aiService.executeCommand(projectId, diagramId, auth.getName(), request);
+    Long expectedRev = revisionHeader != null ? revisionHeader : (ifMatch != null && !ifMatch.isBlank() ? Long.parseLong(ifMatch.replace("\"", "").trim()) : null);
+    CommandResponse res = aiService.executeCommand(projectId, diagramId, auth.getName(), request, expectedRev);
+    long currentRev = umlService.getDiagramRevision(diagramId);
+    response.setHeader("X-Diagram-Revision", String.valueOf(currentRev));
+    return res;
   }
 
   @PostMapping("/chat")
@@ -50,9 +57,28 @@ public class AiController {
       @PathVariable UUID projectId,
       @PathVariable UUID diagramId,
       Authentication auth,
-      @Valid @RequestBody AiRequests.ApplyImageModelRequest request
+      @Valid @RequestBody AiRequests.ApplyImageModelRequest request,
+      @RequestHeader(value = "X-Diagram-Revision", required = false) Long revisionHeader,
+      @RequestHeader(value = "If-Match", required = false) String ifMatch,
+      jakarta.servlet.http.HttpServletResponse response
   ) {
-    return aiService.applyImageModel(projectId, diagramId, auth.getName(), request);
+    Long expectedRev = requireExpectedRevision(revisionHeader, ifMatch);
+    AiResponses.ImageReconstructionResponse res = aiService.applyImageModel(projectId, diagramId, auth.getName(), request, expectedRev);
+    if (res.updatedDiagram() != null && res.updatedDiagram().diagram() != null) {
+      response.setHeader("X-Diagram-Revision", String.valueOf(res.updatedDiagram().diagram().revision()));
+    }
+    return res;
+  }
+
+  private Long requireExpectedRevision(Long headerRevision, String ifMatch) {
+    if (headerRevision != null) return headerRevision;
+    if (ifMatch != null && !ifMatch.isBlank()) {
+      try {
+        return Long.parseLong(ifMatch.replace("\"", "").trim());
+      } catch (NumberFormatException ignored) {}
+    }
+    throw new bo.edu.caseapp.error.BadRequestException(
+        "Se requiere la revisión esperada del diagrama ('X-Diagram-Revision' o 'If-Match') para verificar la concurrencia optimista.");
   }
 
   @PostMapping("/analyze-image")

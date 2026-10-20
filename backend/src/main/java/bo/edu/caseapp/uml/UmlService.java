@@ -17,6 +17,8 @@ import java.util.*;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Service
 @Transactional
@@ -61,10 +63,46 @@ public class UmlService {
     this.collabHandler = collabHandler;
   }
 
-  private void notifyCollab(UUID diagramId, String eventType) {
-    if (collabHandler != null && diagramId != null) {
-      collabHandler.broadcastDiagramChanged(diagramId, eventType);
+  public void notifyCollabAfterCommit(UUID diagramId, String eventType, Long revision) {
+    if (collabHandler == null || diagramId == null) return;
+    if (TransactionSynchronizationManager.isSynchronizationActive()) {
+      TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+        @Override
+        public void afterCommit() {
+          collabHandler.broadcastDiagramChanged(diagramId, eventType, revision);
+        }
+      });
+    } else {
+      collabHandler.broadcastDiagramChanged(diagramId, eventType, revision);
     }
+  }
+
+  private void notifyCollab(UUID diagramId, String eventType) {
+    notifyCollab(diagramId, eventType, null);
+  }
+
+  private void notifyCollab(UUID diagramId, String eventType, Long revision) {
+    notifyCollabAfterCommit(diagramId, eventType, revision);
+  }
+
+  public long reserveNextRevision(UUID diagramId, Long expectedRevision) {
+    if (expectedRevision != null) {
+      int updated = diagrams.incrementRevisionIfMatches(diagramId, expectedRevision);
+      if (updated == 0) {
+        long currentRev = diagrams.findRevisionById(diagramId).orElse(1L);
+        throw new ConflictException("Conflicto de concurrencia: el diagrama ha sido modificado por otro colaborador (revisión esperada: "
+            + expectedRevision + ", revisión actual: " + currentRev + "). Actualiza el diagrama para sincronizar.");
+      }
+      return expectedRevision + 1;
+    } else {
+      diagrams.incrementRevisionUnconditional(diagramId);
+      return diagrams.findRevisionById(diagramId).orElse(1L);
+    }
+  }
+
+  @Transactional(readOnly = true)
+  public long getDiagramRevision(UUID diagramId) {
+    return diagrams.findRevisionById(diagramId).orElse(1L);
   }
 
   @Transactional(readOnly = true)
@@ -155,17 +193,34 @@ public class UmlService {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = findDiagram(projectId, diagramId);
     requireNotLocked(diagram, email);
-    diagram.update(request.nombre().trim(), clean(request.descripcion()));
-    notifyCollab(diagramId, "DIAGRAM_UPDATED");
+
+    String newNombre = request.nombre().trim();
+    String newDesc = clean(request.descripcion());
+    if (Objects.equals(diagram.getNombre(), newNombre) && Objects.equals(diagram.getDescripcion(), newDesc)) {
+      return summary(diagram);
+    }
+    long newRev = reserveNextRevision(diagramId, request.expectedRevision());
+    diagram.setRevision(newRev);
+
+    diagram.update(newNombre, newDesc);
+    notifyCollab(diagramId, "DIAGRAM_UPDATED", newRev);
     return summary(diagram);
   }
 
   public void deleteDiagram(UUID projectId, UUID diagramId, String email) {
+    deleteDiagram(projectId, diagramId, email, null);
+  }
+
+  public void deleteDiagram(UUID projectId, UUID diagramId, String email, Long expectedRevision) {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = findDiagram(projectId, diagramId);
     requireNotLocked(diagram, email);
+    if (expectedRevision != null && diagram.getRevision() != expectedRevision) {
+      throw new ConflictException("Conflicto de concurrencia al eliminar diagrama (revisión esperada: "
+          + expectedRevision + ", actual: " + diagram.getRevision() + ").");
+    }
     diagrams.delete(diagram);
-    notifyCollab(diagramId, "DIAGRAM_DELETED");
+    notifyCollab(diagramId, "DIAGRAM_DELETED", null);
   }
 
   public ElementDetail saveElement(UUID projectId, UUID diagramId, String email, SaveElement request) {
@@ -183,7 +238,7 @@ public class UmlService {
     }
     return saveElement(projectId, diagramId, email,
         new SaveElement(elementId, request.tipoElemento(), request.nombre(), request.posicionX(),
-            request.posicionY(), request.propiedadesJson()), SaveMode.UPDATE);
+            request.posicionY(), request.propiedadesJson(), request.expectedRevision()), SaveMode.UPDATE);
   }
 
   private ElementDetail saveElement(UUID projectId, UUID diagramId, String email, SaveElement request, SaveMode mode) {
@@ -204,6 +259,8 @@ public class UmlService {
         if (mode == SaveMode.CREATE) {
           throw new ConflictException("El identificador del elemento ya corresponde a otro contenido.");
         }
+        long newRev = reserveNextRevision(diagramId, request.expectedRevision());
+        diagram.setRevision(newRev);
         element.update(
             request.tipoElemento(),
             request.nombre().trim(),
@@ -214,6 +271,8 @@ public class UmlService {
       } else {
         if (mode == SaveMode.UPDATE) throw new NotFoundException("Elemento UML no encontrado.");
         created = true;
+        long newRev = reserveNextRevision(diagramId, request.expectedRevision());
+        diagram.setRevision(newRev);
         element = new ElementoUML(
             request.id(),
             diagram,
@@ -227,6 +286,8 @@ public class UmlService {
     } else {
       if (mode == SaveMode.UPDATE) throw new BadRequestException("La actualización requiere el identificador del elemento.");
       created = true;
+      long newRev = reserveNextRevision(diagramId, request.expectedRevision());
+      diagram.setRevision(newRev);
       element = new ElementoUML(
           diagram,
           request.tipoElemento(),
@@ -238,7 +299,7 @@ public class UmlService {
     }
     ElementoUML persisted = created ? saveNewElement(element) : elements.save(element);
     ElementDetail saved = elementDetail(persisted);
-    notifyCollab(diagramId, "ELEMENT_SAVED");
+    notifyCollab(diagramId, "ELEMENT_SAVED", diagram.getRevision());
     return saved;
   }
 
@@ -247,7 +308,10 @@ public class UmlService {
     DiagramaClase diagram = findDiagram(projectId, diagramId);
     requireNotLocked(diagram, email);
 
-    if (request.positions() == null) return;
+    if (request.positions() == null || request.positions().isEmpty()) return;
+    long newRev = reserveNextRevision(diagramId, request.expectedRevision());
+    diagram.setRevision(newRev);
+
     for (PositionUpdate pos : request.positions()) {
       elements.findById(pos.id()).ifPresent(el -> {
         if (el.getDiagrama().getId().equals(diagramId)) {
@@ -256,10 +320,14 @@ public class UmlService {
         }
       });
     }
-    notifyCollab(diagramId, "POSITIONS_SYNCED");
+    notifyCollab(diagramId, "POSITIONS_SYNCED", newRev);
   }
 
   public void deleteElement(UUID projectId, UUID diagramId, String email, UUID elementId) {
+    deleteElement(projectId, diagramId, email, elementId, null);
+  }
+
+  public void deleteElement(UUID projectId, UUID diagramId, String email, UUID elementId, Long expectedRevision) {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = findDiagram(projectId, diagramId);
     requireNotLocked(diagram, email);
@@ -268,10 +336,12 @@ public class UmlService {
     if (!element.getDiagrama().getId().equals(diagramId)) {
       throw new BadRequestException("El elemento no pertenece a este diagrama.");
     }
+    long newRev = reserveNextRevision(diagramId, expectedRevision);
+    diagram.setRevision(newRev);
     // Eliminar relaciones conectadas
     relations.deleteByElementoOrigenIdOrElementoDestinoId(elementId, elementId);
     elements.delete(element);
-    notifyCollab(diagramId, "ELEMENT_DELETED");
+    notifyCollab(diagramId, "ELEMENT_DELETED", newRev);
   }
 
   public RelationDetail saveRelation(UUID projectId, UUID diagramId, String email, SaveRelation request) {
@@ -289,7 +359,7 @@ public class UmlService {
     }
     return saveRelation(projectId, diagramId, email,
         new SaveRelation(relationId, request.elementoOrigen(), request.elementoDestino(), request.nombreRelacion(),
-            request.tipoRelacion(), request.multiplicidadOrigen(), request.multiplicidadDestino()), SaveMode.UPDATE);
+            request.tipoRelacion(), request.multiplicidadOrigen(), request.multiplicidadDestino(), request.expectedRevision()), SaveMode.UPDATE);
   }
 
   private RelationDetail saveRelation(UUID projectId, UUID diagramId, String email, SaveRelation request, SaveMode mode) {
@@ -319,6 +389,8 @@ public class UmlService {
         if (mode == SaveMode.CREATE) {
           throw new ConflictException("El identificador de la relación ya corresponde a otro contenido.");
         }
+        long newRev = reserveNextRevision(diagramId, request.expectedRevision());
+        diagram.setRevision(newRev);
         relation.update(
             origen,
             destino,
@@ -330,6 +402,8 @@ public class UmlService {
       } else {
         if (mode == SaveMode.UPDATE) throw new NotFoundException("Relación UML no encontrada.");
         created = true;
+        long newRev = reserveNextRevision(diagramId, request.expectedRevision());
+        diagram.setRevision(newRev);
         relation = new RelacionUML(
             request.id(),
             diagram,
@@ -344,6 +418,8 @@ public class UmlService {
     } else {
       if (mode == SaveMode.UPDATE) throw new BadRequestException("La actualización requiere el identificador de la relación.");
       created = true;
+      long newRev = reserveNextRevision(diagramId, request.expectedRevision());
+      diagram.setRevision(newRev);
       relation = new RelacionUML(
           diagram,
           origen,
@@ -356,11 +432,15 @@ public class UmlService {
     }
     RelacionUML persisted = created ? saveNewRelation(relation) : relations.save(relation);
     RelationDetail saved = relationDetail(persisted);
-    notifyCollab(diagramId, "RELATION_SAVED");
+    notifyCollab(diagramId, "RELATION_SAVED", diagram.getRevision());
     return saved;
   }
 
   public void deleteRelation(UUID projectId, UUID diagramId, String email, UUID relationId) {
+    deleteRelation(projectId, diagramId, email, relationId, null);
+  }
+
+  public void deleteRelation(UUID projectId, UUID diagramId, String email, UUID relationId, Long expectedRevision) {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = findDiagram(projectId, diagramId);
     requireNotLocked(diagram, email);
@@ -369,8 +449,10 @@ public class UmlService {
     if (!relation.getDiagrama().getId().equals(diagramId)) {
       throw new BadRequestException("La relación no pertenece a este diagrama.");
     }
+    long newRev = reserveNextRevision(diagramId, expectedRevision);
+    diagram.setRevision(newRev);
     relations.delete(relation);
-    notifyCollab(diagramId, "RELATION_DELETED");
+    notifyCollab(diagramId, "RELATION_DELETED", newRev);
   }
 
   private DiagramaClase findDiagram(UUID projectId, UUID diagramId) {
@@ -392,7 +474,8 @@ public class UmlService {
         d.getFechaCreacion(),
         d.isBloqueado(),
         d.getBloqueadoPor(),
-        d.getFechaBloqueo()
+        d.getFechaBloqueo(),
+        d.getRevision()
     );
   }
 

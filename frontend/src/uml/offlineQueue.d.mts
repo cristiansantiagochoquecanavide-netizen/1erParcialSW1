@@ -3,6 +3,7 @@ export interface OfflineAction {
   type: string
   payload: any
   timestamp: number
+  expectedRevision?: number | null
 }
 
 export interface DiagramContentSnapshot {

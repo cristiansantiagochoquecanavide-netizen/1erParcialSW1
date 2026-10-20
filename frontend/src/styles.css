@@ -1277,5 +1277,88 @@ main.workspace-page > .error { margin: .75rem 1rem; }
 .ea-state { margin-top: .45rem; color: #475569; font-size: 10px; font-weight: 500; }
 
 .workspace-footer { display: flex; align-items: center; gap: 1rem; height: 32px; flex: 0 0 auto; overflow: hidden; padding: 0 1rem; border-top: 1px solid var(--line); background: #fff; color: #475569; font-size: 10px; font-weight: 600; white-space: nowrap; }.footer-last { margin-left: auto; }
-@media (max-width: 1050px) { .workspace-grid { grid-template-columns: 170px 5px minmax(250px, 1fr) !important; }.properties-panel { display: none; } }
-@media (max-width: 700px) { .workspace-topbar { flex-direction: row; align-items: center; flex-wrap: wrap; height: auto; padding: .65rem; gap: .5rem; }.topbar-status { order: 3; flex-basis: 100%; overflow: auto; }.topbar-diagram { display: none; }.modeling-modes { grid-template-columns: 1fr; padding: .55rem; }.mode-card { min-height: 48px; }.workspace-grid { display: flex; flex-direction: column; overflow: visible; }.tool-sidebar { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); max-height: 240px; border-right: 0; border-bottom: 1px solid var(--line); }.tool-sidebar .panel-heading,.tool-group-label,.sidebar-hint { grid-column: 1/-1; }.canvas-column { min-height: 520px; }.properties-panel { display: block; }.workspace-footer { gap: .6rem; }.workspace-footer span:nth-child(2),.workspace-footer span:nth-child(3) { display: none; } }
+
+/* Contenedor y Pestañas del Panel Lateral Derecho (Inspector / Espacio de Equipo) */
+.right-panel-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+  background: #ffffff;
+  border-left: 1px solid var(--line);
+}
+
+.right-panel-tabbar {
+  display: flex;
+  align-items: center;
+  background: #f1f5f9;
+  border-bottom: 1px solid #cbd5e1;
+  padding: 4px 6px 0;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.right-tab-btn {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 5px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.right-tab-btn:hover {
+  color: #0f172a;
+}
+
+.right-tab-btn.active {
+  background: #ffffff;
+  color: #2563eb;
+  border-bottom-color: #2563eb;
+  border-radius: 4px 4px 0 0;
+  font-weight: 700;
+}
+
+.right-tab-collapse {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  color: #64748b;
+  padding: 2px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.right-tab-collapse:hover {
+  background: #fee2e2;
+  color: #dc2626;
+  border-color: #fca5a5;
+}
+
+.chrome-button.team-active-btn {
+  background: #dbeafe;
+  color: #1d4ed8;
+  border-color: #93c5fd;
+  font-weight: 700;
+}
+
+.open-panel-btn {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+}
+.open-panel-btn:hover {
+  background: #dbeafe;
+}
+
+@media (max-width: 1050px) { .workspace-grid { grid-template-columns: 170px 5px minmax(250px, 1fr) !important; }.properties-panel, .right-panel-container { display: none; } }
+@media (max-width: 700px) { .workspace-topbar { flex-direction: row; align-items: center; flex-wrap: wrap; height: auto; padding: .65rem; gap: .5rem; }.topbar-status { order: 3; flex-basis: 100%; overflow: auto; }.topbar-diagram { display: none; }.modeling-modes { grid-template-columns: 1fr; padding: .55rem; }.mode-card { min-height: 48px; }.workspace-grid { display: flex; flex-direction: column; overflow: visible; }.tool-sidebar { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); max-height: 240px; border-right: 0; border-bottom: 1px solid var(--line); }.tool-sidebar .panel-heading,.tool-group-label,.sidebar-hint { grid-column: 1/-1; }.canvas-column { min-height: 520px; }.properties-panel, .right-panel-container { display: block; }.workspace-footer { gap: .6rem; }.workspace-footer span:nth-child(2),.workspace-footer span:nth-child(3) { display: none; } }
+

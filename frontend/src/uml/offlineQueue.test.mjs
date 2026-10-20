@@ -98,3 +98,103 @@ test('detects server content drift before replay and ignores array ordering', ()
   assert.equal(snapshotContentMatches(base, changed), false)
   assert.equal(snapshotContentMatches({ elements: [{ id: 'b' }, { id: 'a' }], relations: [] }, { elements: [{ id: 'a' }, { id: 'b' }], relations: [] }), true)
 })
+
+test('queued actions retain expectedRevision and replay preserves queue on 409 conflict', async () => {
+  const queue = [
+    { ...action('op-1'), expectedRevision: 5, payload: { id: 'e1', nombre: 'ClaseA' } },
+    { ...action('op-2'), expectedRevision: 6, payload: { id: 'e2', nombre: 'ClaseB' } },
+    { ...action('op-3'), expectedRevision: 7, payload: { id: 'e3', nombre: 'ClaseC' } }
+  ]
+
+  const sentRevisions = []
+  const error409 = new Error('HTTP 409 Conflict: Diagram revision changed')
+  error409.status = 409
+
+  const result = await replayPendingQueue(queue, async (item) => {
+    sentRevisions.push({ id: item.id, rev: item.expectedRevision })
+    if (item.id === 'op-2') {
+      throw error409
+    }
+  })
+
+  // op-1 succeeded, op-2 failed with conflict, op-3 was not attempted
+  assert.deepEqual(sentRevisions, [
+    { id: 'op-1', rev: 5 },
+    { id: 'op-2', rev: 6 }
+  ])
+  assert.deepEqual(result.completedIds, ['op-1'])
+  assert.equal(result.failedActionId, 'op-2')
+  assert.equal(result.error.status, 409)
+
+  const pending = queue.filter((item) => !result.completedIds.includes(item.id))
+  assert.equal(pending.length, 2)
+  assert.equal(pending[0].id, 'op-2')
+  assert.equal(pending[0].expectedRevision, 6)
+  assert.equal(pending[1].id, 'op-3')
+  assert.equal(pending[1].expectedRevision, 7)
+})
+
+test('simulates 3 queued operations: tracks sequential revisions, halts on 409, and prevents duplication on retry', async () => {
+  const queue = [
+    { ...action('op-1'), type: 'SAVE_ELEMENT', payload: { id: 'elem-1', nombre: 'ClaseA' } },
+    { ...action('op-2'), type: 'SAVE_ELEMENT', payload: { id: 'elem-2', nombre: 'ClaseB' } },
+    { ...action('op-3'), type: 'SAVE_RELATION', payload: { id: 'rel-1', elementoOrigen: 'elem-1', elementoDestino: 'elem-2' } }
+  ]
+
+  let serverCurrentRevision = 10
+  const serverReceived = []
+
+  // Simulate server endpoint
+  const mockServerHandler = async (action, expectedRevision, simulateConflictOnId = null) => {
+    if (action.id === simulateConflictOnId) {
+      const err = new Error('HTTP 409 Conflict')
+      err.status = 409
+      throw err
+    }
+    // Server verifies optimistic concurrency
+    if (expectedRevision !== serverCurrentRevision) {
+      const err = new Error(`HTTP 409 Conflict: expected ${expectedRevision} but was ${serverCurrentRevision}`)
+      err.status = 409
+      throw err
+    }
+    serverCurrentRevision++
+    serverReceived.push({ id: action.id, verifiedRevision: expectedRevision, newRevision: serverCurrentRevision })
+    return { revision: serverCurrentRevision }
+  }
+
+  // Attempt 1: op-1 succeeds (rev 10 -> 11), op-2 fails with 409
+  let clientRevision = 10
+  const attempt1 = await replayPendingQueue(queue, async (item) => {
+    const res = await mockServerHandler(item, clientRevision, 'op-2')
+    clientRevision = res.revision
+  })
+
+  // 1. op-1 confirmed, op-2 failed, op-3 unattempted
+  assert.deepEqual(attempt1.completedIds, ['op-1'])
+  assert.equal(attempt1.failedActionId, 'op-2')
+  assert.equal(attempt1.error.status, 409)
+
+  // 2. Queue retained remaining operations (op-2 and op-3)
+  const remainingQueue = queue.filter((item) => !attempt1.completedIds.includes(item.id))
+  assert.equal(remainingQueue.length, 2)
+  assert.deepEqual(remainingQueue.map((it) => it.id), ['op-2', 'op-3'])
+
+  // 3. Retry after syncing latest revision from server (say server is at 11 now)
+  clientRevision = serverCurrentRevision // 11
+  const attempt2 = await replayPendingQueue(remainingQueue, async (item) => {
+    const res = await mockServerHandler(item, clientRevision, null)
+    clientRevision = res.revision
+  })
+
+  // 4. op-2 and op-3 now succeed with sequential revisions 11 and 12
+  assert.deepEqual(attempt2.completedIds, ['op-2', 'op-3'])
+  assert.equal(attempt2.error, null)
+
+  // 5. Total server mutations processed: exactly op-1 (rev 10), op-2 (rev 11), op-3 (rev 12). No duplication of op-1!
+  assert.deepEqual(serverReceived, [
+    { id: 'op-1', verifiedRevision: 10, newRevision: 11 },
+    { id: 'op-2', verifiedRevision: 11, newRevision: 12 },
+    { id: 'op-3', verifiedRevision: 12, newRevision: 13 }
+  ])
+})
+

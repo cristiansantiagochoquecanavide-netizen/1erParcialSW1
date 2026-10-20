@@ -16,10 +16,15 @@ public final class UmlResponses {
       Instant fechaCreacion,
       boolean bloqueado,
       String bloqueadoPor,
-      Instant fechaBloqueo
+      Instant fechaBloqueo,
+      long revision
   ) {
     public DiagramSummary(UUID id, UUID projectId, String nombre, String descripcion, String estado, Instant fechaCreacion) {
-      this(id, projectId, nombre, descripcion, estado, fechaCreacion, false, null, null);
+      this(id, projectId, nombre, descripcion, estado, fechaCreacion, false, null, null, 1L);
+    }
+
+    public DiagramSummary(UUID id, UUID projectId, String nombre, String descripcion, String estado, Instant fechaCreacion, boolean bloqueado, String bloqueadoPor, Instant fechaBloqueo) {
+      this(id, projectId, nombre, descripcion, estado, fechaCreacion, bloqueado, bloqueadoPor, fechaBloqueo, 1L);
     }
   }
 

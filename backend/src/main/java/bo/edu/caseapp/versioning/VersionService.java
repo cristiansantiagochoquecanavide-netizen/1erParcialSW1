@@ -85,6 +85,10 @@ public class VersionService {
   }
 
   public DiagramFullView restoreVersion(UUID projectId, UUID diagramId, UUID versionId, String email) {
+    return restoreVersion(projectId, diagramId, versionId, email, null);
+  }
+
+  public DiagramFullView restoreVersion(UUID projectId, UUID diagramId, UUID versionId, String email, Long expectedRevision) {
     projectService.requireCanEdit(projectId, email);
     DiagramaClase diagram = validateDiagramBelongsToProject(projectId, diagramId);
 
@@ -97,6 +101,9 @@ public class VersionService {
     } catch (JsonProcessingException e) {
       throw new BadRequestException("Snapshot de versión corrupto o incompatible.");
     }
+
+    long newRev = umlService.reserveNextRevision(diagramId, expectedRevision);
+    diagram.setRevision(newRev);
 
     // 1. Eliminar relaciones y elementos actuales del diagrama
     relationRepo.deleteByDiagramaId(diagramId);
@@ -135,6 +142,7 @@ public class VersionService {
       }
     }
 
+    umlService.notifyCollabAfterCommit(diagramId, "VERSION_RESTORED", newRev);
     return umlService.getDiagram(projectId, diagramId, email);
   }
 

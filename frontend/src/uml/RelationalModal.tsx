@@ -7,6 +7,7 @@ type Props = {
   projectId?: string
   diagramId?: string
   token?: string
+  revision?: number
   isReadOnly?: boolean
   onClose: () => void
   onDiagramUpdated?: (fullView: DiagramFullView) => void
@@ -19,6 +20,7 @@ export function RelationalModal({
   projectId,
   diagramId,
   token,
+  revision,
   isReadOnly,
   onClose,
   onDiagramUpdated,
@@ -58,7 +60,8 @@ export function RelationalModal({
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
+          Authorization: `Bearer ${token}`,
+          'X-Diagram-Revision': String(revision ?? 1)
         },
         body: JSON.stringify({ sql: importSqlText })
       })
